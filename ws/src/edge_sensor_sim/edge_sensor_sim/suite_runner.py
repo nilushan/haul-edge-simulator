@@ -87,18 +87,15 @@ class SuiteRunner:
         while not self._stop.is_set():
             wall = time.perf_counter() - t0_wall
             # map wall time into [0, duration) if looping
+            # Continuous world time (never teleport the vehicle). duration_s is only
+            # used for history buffer sizing / UI; looping no longer resets pose.
             if cfg.loop:
-                t = wall % cfg.duration_s
-                # detect wrap to a new cycle
-                if wall > 0 and t + 0.25 < self._t:
-                    self._cycle += 1
-                    self.vehicle.reset(0.0)
-                    next_imu = next_gnss = next_lidar = next_odom = 0.0
-                    with self._lock:
-                        self.imu_buf.clear()
-                        self.gnss_buf.clear()
-                        self.odom_buf.clear()
-                self._t = t
+                self._t = wall
+                # cycle counter for UI only (each duration_s window)
+                new_cycle = int(wall // max(cfg.duration_s, 1.0))
+                if new_cycle != self._cycle:
+                    self._cycle = new_cycle
+                    # Keep vehicle + map continuity — do NOT reset pose or clear sensors.
             else:
                 self._t = min(wall, cfg.duration_s)
                 if wall >= cfg.duration_s:
@@ -109,13 +106,25 @@ class SuiteRunner:
 
             if self._t + 1e-9 >= next_odom:
                 next_odom = self._t + dt_odom
+                speed = float(np.hypot(st.vx, st.vy))
                 odom = {
                     't': st.t,
                     'x': st.x,
                     'y': st.y,
                     'z': st.z,
                     'yaw': st.yaw,
-                    'speed': float(np.hypot(st.vx, st.vy)),
+                    'pitch': st.pitch,
+                    'roll': st.roll,
+                    'vx': st.vx,
+                    'vy': st.vy,
+                    'vz': st.vz,
+                    'yaw_rate': st.yaw_rate,
+                    'pitch_rate': st.pitch_rate,
+                    'roll_rate': st.roll_rate,
+                    'ax': st.ax,
+                    'ay': st.ay,
+                    'az': st.az,
+                    'speed': speed,
                 }
                 with self._lock:
                     self.odom_buf.append(odom)

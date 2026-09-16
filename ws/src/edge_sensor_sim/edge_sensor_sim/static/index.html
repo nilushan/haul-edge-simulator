@@ -3,61 +3,75 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Haul edge sensor suite</title>
+  <title>Haul edge — physics view</title>
   <link rel="stylesheet" href="/static/style.css" />
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
-  <script src="/static/app.js" defer></script>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script type="module" src="/static/app.js"></script>
 </head>
 <body>
-  <header class="top">
-    <div>
-      <h1>Haul edge sensor suite</h1>
-      <p class="sub">Synthetic IMU · GNSS · LiDAR · path — REST + WebSocket</p>
+  <div id="stage">
+    <canvas id="scene3d"></canvas>
+
+    <header class="overlay top">
+      <div>
+        <h1>Haul truck edge suite</h1>
+        <p class="sub">Scene = live odom path + LiDAR returns only (no decorative terrain)</p>
+      </div>
+      <div class="badges">
+        <span id="conn" class="badge bad">WS offline</span>
+        <span id="clock" class="badge">t = 0.00 s</span>
+        <span id="cycle" class="badge">cycle 0</span>
+        <span id="camMode" class="badge">follow vehicle</span>
+      </div>
+    </header>
+
+    <!-- Physics HUD -->
+    <aside class="overlay hud left">
+      <h2>Kinematics</h2>
+      <div class="row"><span>Ground speed</span><b id="p_speed">—</b></div>
+      <div class="row"><span>v<sub>ENU</sub></span><b id="p_vel">—</b></div>
+      <div class="row"><span>Course / yaw</span><b id="p_yaw">—</b></div>
+      <div class="row"><span>Pitch / roll</span><b id="p_att">—</b></div>
+      <div class="row"><span>Position ENU</span><b id="p_pos">—</b></div>
+      <div class="row"><span>Altitude (GNSS)</span><b id="p_alt">—</b></div>
+
+      <h2>Dynamics (body)</h2>
+      <div class="row"><span>Specific force</span><b id="p_sf">—</b></div>
+      <div class="row"><span>a<sub>horiz</sub> / vertical g</span><b id="p_g">—</b></div>
+      <div class="row"><span>Yaw rate</span><b id="p_yr">—</b></div>
+      <div class="row"><span>Pitch / roll rate</span><b id="p_pr">—</b></div>
+      <div class="row"><span>Centripetal (est.)</span><b id="p_cent">—</b></div>
+
+      <h2>Sensors</h2>
+      <div class="row"><span>GNSS fix</span><b id="p_fix">—</b></div>
+      <div class="row"><span>Lat / Lon</span><b id="p_ll">—</b></div>
+      <div class="row"><span>LiDAR returns</span><b id="p_lidar">—</b></div>
+    </aside>
+
+    <aside class="overlay hud right">
+      <h2>Accelerometer <small>m/s²</small></h2>
+      <canvas id="chartAccel" height="110"></canvas>
+      <h2>Gyro <small>deg/s</small></h2>
+      <canvas id="chartGyro" height="110"></canvas>
+      <h2>Speed <small>km/h</small> · vertical load <small>g</small></h2>
+      <canvas id="chartSpeed" height="90"></canvas>
+      <p class="hint">1 follow (drag orbit · wheel zoom · tracks truck) · 2 top · 3 free pan/orbit · M clear map</p>
+    </aside>
+
+    <div class="overlay legend">
+      <span class="swatch ground"></span> map ground
+      <span class="swatch rock"></span> map high
+      <span class="swatch berm"></span> live scan
+      <span class="swatch truck"></span> truck / trail
     </div>
-    <div class="badges">
-      <span id="conn" class="badge bad">WS offline</span>
-      <span id="clock" class="badge">t = 0.0 s</span>
-      <span id="cycle" class="badge">cycle 0</span>
-    </div>
-  </header>
-
-  <section class="stats" id="stats">
-    <div class="stat"><label>Speed</label><div id="s_speed">—</div></div>
-    <div class="stat"><label>IMU az</label><div id="s_az">—</div></div>
-    <div class="stat"><label>Yaw rate</label><div id="s_gz">—</div></div>
-    <div class="stat"><label>GNSS</label><div id="s_gnss">—</div></div>
-    <div class="stat"><label>LiDAR pts</label><div id="s_lidar">—</div></div>
-    <div class="stat"><label>Pose ENU</label><div id="s_pose">—</div></div>
-  </section>
-
-  <main class="grid">
-    <article class="card wide">
-      <h2>IMU acceleration (body)</h2>
-      <canvas id="chartAccel" height="120"></canvas>
-    </article>
-    <article class="card wide">
-      <h2>IMU gyro (body)</h2>
-      <canvas id="chartGyro" height="120"></canvas>
-    </article>
-    <article class="card">
-      <h2>Vehicle path (ENU)</h2>
-      <canvas id="pathCanvas" width="480" height="360"></canvas>
-      <p class="hint">Top-down · x east, y north · trail ≈ 1 min</p>
-    </article>
-    <article class="card">
-      <h2>LiDAR BEV (body)</h2>
-      <canvas id="lidarCanvas" width="480" height="360"></canvas>
-      <p class="hint">x forward, y left · colour by height</p>
-    </article>
-    <article class="card wide">
-      <h2>GNSS altitude / fix</h2>
-      <canvas id="chartGnss" height="100"></canvas>
-    </article>
-  </main>
-
-  <footer class="foot">
-    <span>REST <code>/api/status</code> · <code>/api/lidar</code> · <code>/api/history/{imu|gnss|odom}</code></span>
-    <span>WS <code>/ws</code></span>
-  </footer>
+  </div>
 </body>
 </html>
