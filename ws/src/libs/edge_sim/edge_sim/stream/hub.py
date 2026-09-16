@@ -56,6 +56,10 @@ class StreamConfig:
     vehicle_hz: float = 50.0
     history_s: float = 60.0
     lidar_max_points: int = 20000
+    lidar_n_rings: int = 16
+    lidar_n_azimuth: int = 288
+    lidar_max_range_m: float = 40.0
+    lidar_ray_step_m: float = 0.25
     speed_mps: Optional[float] = None  # None → use map default
     record_dir: Optional[str] = None  # if set in live mode, record first cycle
 
@@ -77,6 +81,16 @@ class StreamConfig:
         if isinstance(self.lidar_max_points, bool) or int(self.lidar_max_points) < 1:
             raise ValueError('lidar_max_points must be a positive integer')
         self.lidar_max_points = int(self.lidar_max_points)
+        if int(self.lidar_n_rings) < 1 or int(self.lidar_n_azimuth) < 1:
+            raise ValueError('lidar_n_rings and lidar_n_azimuth must be positive')
+        self.lidar_n_rings = int(self.lidar_n_rings)
+        self.lidar_n_azimuth = int(self.lidar_n_azimuth)
+        if not math.isfinite(float(self.lidar_max_range_m)) or float(self.lidar_max_range_m) <= 1.0:
+            raise ValueError('lidar_max_range_m must be a finite value greater than 1.0')
+        self.lidar_max_range_m = float(self.lidar_max_range_m)
+        if not math.isfinite(float(self.lidar_ray_step_m)) or float(self.lidar_ray_step_m) <= 0:
+            raise ValueError('lidar_ray_step_m must be a positive finite value')
+        self.lidar_ray_step_m = float(self.lidar_ray_step_m)
         if self.speed_mps is not None and (
             not math.isfinite(float(self.speed_mps)) or float(self.speed_mps) <= 0
         ):
@@ -180,7 +194,14 @@ class StreamHub:
         self._vehicle = VehicleSimulator(speed_mps=speed, world=world, seed=spec.seed + 7)
         self._imu = ImuSimulator(seed=spec.seed + 11)
         self._gnss = GnssSimulator(seed=spec.seed + 13)
-        self._lidar = LidarSimulator(world=world, seed=spec.seed + 17)
+        self._lidar = LidarSimulator(
+            world=world,
+            seed=spec.seed + 17,
+            n_rings=self.cfg.lidar_n_rings,
+            n_azimuth=self.cfg.lidar_n_azimuth,
+            max_range_m=self.cfg.lidar_max_range_m,
+            ray_step_m=self.cfg.lidar_ray_step_m,
+        )
         self._vehicle.reset(0.0)
 
         if self.cfg.record_dir and not self._record_done and self._writer is None:

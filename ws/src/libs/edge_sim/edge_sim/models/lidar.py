@@ -33,12 +33,12 @@ class LidarSimulator:
     def __init__(
         self,
         n_rings: int = 16,
-        n_azimuth: int = 144,  # paired with 0.25 m marching for real-time first-hit scans
+        n_azimuth: int = 288,  # paired with 0.25 m marching for real-time first-hit scans
         elev_min_deg: float = -20.0,
         elev_max_deg: float = 4.0,
         az_full_circle: bool = True,
         min_range_m: float = 1.5,
-        max_range_m: float = 90.0,
+        max_range_m: float = 40.0,
         ray_iters: int = 10,
         ray_step_m: float = 0.25,
         noise_std_m: float = 0.03,
