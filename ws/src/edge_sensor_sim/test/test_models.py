@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
+
 from edge_sensor_sim.models import (
     GnssSimulator,
+    HaulWorld,
     ImuSimulator,
     LidarSimulator,
     VehicleSimulator,
@@ -13,11 +16,12 @@ from edge_sensor_sim.models import (
 
 
 def test_vehicle_moves_forward():
-    v = VehicleSimulator(speed_mps=10.0)
+    w = HaulWorld(seed=1)
+    v = VehicleSimulator(speed_mps=10.0, world=w)
     v.reset(0.0)
     s0 = v.step(0.0)
     s1 = v.step(1.0)
-    assert s1.x > s0.x
+    assert math.hypot(s1.x - s0.x, s1.y - s0.y) > 3.0
     assert math.hypot(s1.vx, s1.vy) > 5.0
 
 
@@ -27,7 +31,6 @@ def test_imu_has_gravity_ish():
     v.reset(0.0)
     st = v.step(0.0)
     s = imu.sample(st)
-    # vertical channel should be near +g at rest-ish
     assert s.az > 8.0
 
 
@@ -41,10 +44,14 @@ def test_gnss_fix_fields():
 
 
 def test_lidar_returns_points():
-    v = VehicleSimulator()
-    lid = LidarSimulator(n_forward=20, n_lateral=15)
+    w = HaulWorld(seed=2)
+    v = VehicleSimulator(world=w)
+    lid = LidarSimulator(world=w, n_rings=8, n_azimuth=90, ray_iters=10)
     st = v.step(0.0)
     fr = lid.sample(v, st)
     assert fr.points.ndim == 2 and fr.points.shape[1] == 3
-    assert fr.points.shape[0] > 50
+    assert fr.points.shape[0] > 30
     assert fr.intensity.shape[0] == fr.points.shape[0]
+    # Not a filled rectangle: ring pattern → varying ranges
+    rng = np.linalg.norm(fr.points, axis=1)
+    assert rng.std() > 0.5

@@ -12,6 +12,7 @@ import numpy as np
 
 from edge_sensor_sim.models import (
     GnssSimulator,
+    HaulWorld,
     ImuSimulator,
     LidarSimulator,
     VehicleSimulator,
@@ -28,7 +29,7 @@ class SuiteConfig:
     vehicle_hz: float = 50.0
     speed_mps: float = 8.0
     history_s: float = 60.0
-    lidar_max_points: int = 2500
+    lidar_max_points: int = 4000
 
 
 class SuiteRunner:
@@ -43,10 +44,11 @@ class SuiteRunner:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
-        self.vehicle = VehicleSimulator(speed_mps=self.cfg.speed_mps)
+        self.world = HaulWorld(seed=19)
+        self.vehicle = VehicleSimulator(speed_mps=self.cfg.speed_mps, world=self.world)
         self.imu = ImuSimulator()
         self.gnss = GnssSimulator()
-        self.lidar = LidarSimulator()
+        self.lidar = LidarSimulator(world=self.world)
 
         hist = self.cfg.history_s
         self.imu_buf: Deque[Dict[str, Any]] = deque(maxlen=max(10, int(hist * self.cfg.imu_hz) + 5))

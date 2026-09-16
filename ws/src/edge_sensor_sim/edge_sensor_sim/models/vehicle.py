@@ -1,4 +1,4 @@
-"""Shared haul-truck motion truth used by all sensor models."""
+"""Haul-truck motion along the world centerline (turns, climbs, drops)."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import math
 
 import numpy as np
+
+from .world import HaulWorld
 
 
 @dataclass
@@ -35,7 +37,6 @@ def _wrap_pi(a: float) -> float:
 
 
 def _exp_smooth(prev: float, target: float, dt: float, tau: float) -> float:
-    """First-order lag toward target (realistic plant response)."""
     if tau <= 1e-6:
         return target
     a = 1.0 - math.exp(-dt / tau)
@@ -44,31 +45,32 @@ def _exp_smooth(prev: float, target: float, dt: float, tau: float) -> float:
 
 class VehicleSimulator:
     """
-    Haul-truck motion intended to look plant-like, not toy-cyclic:
-
-      - mostly steady cruise speed with rare gentle accel/brake
-      - long straight segments + infrequent slow heading changes
-      - nearly flat grade; pitch/roll are small and filtered
-      - irregular (not periodic) road bumps
+    Follows HaulWorld centerline with:
+      - speed changes on grades
+      - heading from route curvature (real turns)
+      - pitch from road slope (climbs/drops)
+      - roll from lateral accel in turns
+      - occasional surface bumps
     """
 
     def __init__(
         self,
         speed_mps: float = 7.5,
+        world: HaulWorld | None = None,
         seed: int = 7,
     ) -> None:
+        self.world = world or HaulWorld(seed=seed + 3)
         self.speed_cmd = float(speed_mps)
         self._rng = np.random.default_rng(seed)
 
         self._t = 0.0
-        self._s = 0.0
+        self._s = 0.0  # station along route
         self._prev: VehicleState | None = None
 
-        # Internal plant state
         self._speed = float(speed_mps)
+        self._speed_target = float(speed_mps)
         self._yaw = 0.0
         self._yaw_rate = 0.0
-        self._yaw_rate_cmd = 0.0
         self._x = 0.0
         self._y = 0.0
         self._z = 0.0
@@ -76,14 +78,17 @@ class VehicleSimulator:
         self._roll = 0.0
         self._vz = 0.0
 
-        # Event clocks (irregular)
-        self._next_turn_s = float(self._rng.uniform(18.0, 28.0))
-        self._turn_until_s = -1.0
-        self._next_speed_s = float(self._rng.uniform(12.0, 22.0))
-        self._speed_target = float(speed_mps)
-        self._next_bump_s = float(self._rng.uniform(9.0, 16.0))
+        self._next_speed_s = float(self._rng.uniform(10.0, 18.0))
+        self._next_bump_s = float(self._rng.uniform(8.0, 14.0))
         self._bump_amp = 0.0
         self._bump_t0 = -1.0
+        self._last_ax = 0.0
+        self._last_ay = 0.0
+        self._last_az = 0.0
+
+        # snap to route start
+        self._x, self._y, self._yaw = self.world.centerline(0.0)
+        self._z = float(self.world.height(self._x, self._y))
 
     def reset(self, t0: float = 0.0) -> None:
         self._t = t0
@@ -91,108 +96,102 @@ class VehicleSimulator:
         self._prev = None
         self._speed = self.speed_cmd
         self._speed_target = self.speed_cmd
-        self._yaw = 0.0
-        self._yaw_rate = 0.0
-        self._yaw_rate_cmd = 0.0
-        self._x = 0.0
-        self._y = 0.0
-        self._z = 0.0
+        self._x, self._y, self._yaw = self.world.centerline(0.0)
+        self._z = float(self.world.height(self._x, self._y))
         self._pitch = 0.0
         self._roll = 0.0
         self._vz = 0.0
-        self._next_turn_s = float(self._rng.uniform(18.0, 28.0))
-        self._turn_until_s = -1.0
-        self._next_speed_s = float(self._rng.uniform(12.0, 22.0))
-        self._next_bump_s = float(self._rng.uniform(9.0, 16.0))
+        self._yaw_rate = 0.0
+        self._next_speed_s = float(self._rng.uniform(10.0, 18.0))
+        self._next_bump_s = float(self._rng.uniform(8.0, 14.0))
         self._bump_amp = 0.0
         self._bump_t0 = -1.0
 
-    def _schedule_events(self, t: float) -> None:
-        # Occasional slow turn (not continuous curve)
-        if t >= self._next_turn_s and t >= self._turn_until_s:
-            duration = float(self._rng.uniform(4.0, 8.0))
-            # gentle yaw rate ~ 2–5 deg/s
-            sign = 1.0 if self._rng.random() < 0.5 else -1.0
-            self._yaw_rate_cmd = sign * math.radians(float(self._rng.uniform(2.0, 5.0)))
-            self._turn_until_s = t + duration
-            self._next_turn_s = t + duration + float(self._rng.uniform(16.0, 30.0))
-        if t >= self._turn_until_s:
-            self._yaw_rate_cmd = 0.0
-
-        # Rare cruise speed change
+    def _step_once(self, t: float, dt: float) -> None:
+        # Grade-aware speed target
+        slope = self.world.slope_along_heading(self._x, self._y, self._yaw)
+        grade_factor = float(np.clip(1.0 - 1.8 * slope, 0.55, 1.15))
         if t >= self._next_speed_s:
             self._speed_target = float(
                 np.clip(
-                    self.speed_cmd + self._rng.normal(0.0, 0.6),
-                    max(4.0, self.speed_cmd - 1.5),
-                    self.speed_cmd + 1.2,
+                    self.speed_cmd * grade_factor + self._rng.normal(0.0, 0.35),
+                    4.0,
+                    self.speed_cmd + 1.5,
                 )
             )
-            self._next_speed_s = t + float(self._rng.uniform(14.0, 26.0))
+            self._next_speed_s = t + float(self._rng.uniform(9.0, 18.0))
+        else:
+            self._speed_target = float(
+                np.clip(self.speed_cmd * grade_factor, 4.0, self.speed_cmd + 1.2)
+            )
 
-        # Irregular bumps (not periodic)
+        self._speed = _exp_smooth(self._speed, self._speed_target, dt, tau=2.0)
+
+        self._s += self._speed * dt
+        cx, cy, path_yaw = self.world.centerline(self._s)
+        _, _, yaw_ahead = self.world.centerline(self._s + 8.0)
+        dyaw = _wrap_pi(yaw_ahead - path_yaw)
+        yaw_rate_cmd = dyaw / 8.0 * self._speed
+
+        self._yaw_rate = _exp_smooth(self._yaw_rate, yaw_rate_cmd, dt, tau=0.5)
+        self._yaw = _wrap_pi(_exp_smooth(self._yaw, path_yaw, dt, tau=0.35))
+
+        lat_noise = 0.15 * math.sin(0.05 * self._s)
+        nx, ny = -math.sin(path_yaw), math.cos(path_yaw)
+        self._x = cx + nx * lat_noise
+        self._y = cy + ny * lat_noise
+
+        z_road = float(self.world.height(self._x, self._y))
+        bump_az = 0.0
         if t >= self._next_bump_s:
             self._bump_t0 = t
-            self._bump_amp = float(self._rng.uniform(0.8, 2.2))  # m/s² pulse, mild
-            self._next_bump_s = t + float(self._rng.uniform(11.0, 22.0))
-
-    def step(self, t: float) -> VehicleState:
-        """Advance absolute simulation time to t (seconds)."""
-        dt = max(1e-4, t - self._t)
-        # Cap dt so large jumps (loop reset handled externally) stay stable
-        dt = min(dt, 0.05)
-        self._t = t
-        self._schedule_events(t)
-
-        # Speed plant
-        self._speed = _exp_smooth(self._speed, self._speed_target, dt, tau=2.5)
-        ax_cmd = (self._speed_target - self._speed) / 2.5  # rough
-
-        # Yaw plant — lag commanded rate
-        self._yaw_rate = _exp_smooth(self._yaw_rate, self._yaw_rate_cmd, dt, tau=0.8)
-        self._yaw = _wrap_pi(self._yaw + self._yaw_rate * dt)
-
-        # Integrate planar pose
-        self._x += self._speed * math.cos(self._yaw) * dt
-        self._y += self._speed * math.sin(self._yaw) * dt
-        self._s += self._speed * dt
-
-        # Grade: very mild long wavelength (barely visible), not a bounce
-        z_grade = 0.04 * math.sin(0.012 * self._s)  # ~ cm-level over long distance
-        # Bump as short vertical accel pulse → integrate carefully
-        bump_az = 0.0
+            self._bump_amp = float(self._rng.uniform(0.6, 1.8))
+            self._next_bump_s = t + float(self._rng.uniform(7.0, 16.0))
         if self._bump_t0 >= 0.0:
             age = t - self._bump_t0
-            if age < 0.45:
-                bump_az = self._bump_amp * math.sin(math.pi * age / 0.45)
+            if age < 0.4:
+                bump_az = self._bump_amp * math.sin(math.pi * age / 0.4)
             else:
                 self._bump_t0 = -1.0
-                self._bump_amp = 0.0
 
-        # Vertical dynamics: spring-ish toward grade
-        z_err = z_grade - self._z
-        az_spring = 3.5 * z_err - 2.8 * self._vz  # damped
-        az_body = az_spring + bump_az
-        self._vz += az_body * dt
+        z_err = z_road - self._z
+        az_spring = 8.0 * z_err - 4.5 * self._vz + bump_az
+        self._vz += az_spring * dt
         self._z += self._vz * dt
 
-        # Pitch: follow grade slope + small lag from vertical vel (not oscillatory show)
-        slope = 0.04 * 0.012 * math.cos(0.012 * self._s)  # dz/ds
-        pitch_tgt = float(np.clip(slope * 0.9 + 0.015 * self._vz, -0.04, 0.04))
-        pitch_prev = self._pitch
-        self._pitch = _exp_smooth(self._pitch, pitch_tgt, dt, tau=0.6)
-        pitch_rate = (self._pitch - pitch_prev) / dt
+        pitch_tgt = float(np.clip(-slope * 0.95, -0.18, 0.18))
+        self._pitch = _exp_smooth(self._pitch, pitch_tgt, dt, tau=0.45)
 
-        # Roll: from lateral accel only (steady turn), heavily limited
         ay_body = self._speed * self._yaw_rate
-        roll_tgt = float(np.clip(-0.02 * ay_body, -0.03, 0.03))  # ~1.7 deg max
-        roll_prev = self._roll
-        self._roll = _exp_smooth(self._roll, roll_tgt, dt, tau=0.7)
-        roll_rate = (self._roll - roll_prev) / dt
+        roll_tgt = float(np.clip(-0.035 * ay_body, -0.08, 0.08))
+        self._roll = _exp_smooth(self._roll, roll_tgt, dt, tau=0.5)
 
-        ax_body = float(np.clip(ax_cmd, -0.8, 0.6))
-        # residual vertical for IMU (not huge)
-        az_out = float(np.clip(az_body, -3.0, 3.0))
+        self._last_ax = float(np.clip((self._speed_target - self._speed) / 2.0, -1.2, 0.9))
+        self._last_ay = float(ay_body)
+        self._last_az = float(np.clip(az_spring, -4.0, 4.0))
+        self._last_pitch_rate = 0.0
+        self._last_roll_rate = 0.0
+
+    def step(self, t: float) -> VehicleState:
+        # Sub-step so large jumps (tests / hitch) stay stable
+        dt_total = max(0.0, t - self._t)
+        if dt_total <= 0.0 and self._prev is not None:
+            return self._prev
+
+        pitch_prev = self._pitch
+        roll_prev = self._roll
+        self._last_ax = self._last_ay = self._last_az = 0.0
+
+        t_cursor = self._t
+        while t_cursor < t - 1e-12:
+            dt = min(0.05, t - t_cursor)
+            t_cursor += dt
+            self._step_once(t_cursor, dt)
+
+        self._t = t
+        dt_eff = max(dt_total, 1e-3)
+        pitch_rate = (self._pitch - pitch_prev) / dt_eff
+        roll_rate = (self._roll - roll_prev) / dt_eff
 
         st = VehicleState(
             t=t,
@@ -208,15 +207,14 @@ class VehicleSimulator:
             yaw_rate=self._yaw_rate,
             pitch_rate=pitch_rate,
             roll_rate=roll_rate,
-            ax=ax_body,
-            ay=ay_body,
-            az=az_out,
+            ax=self._last_ax,
+            ay=self._last_ay,
+            az=self._last_az,
         )
         self._prev = st
         return st
 
     def R_body_from_enu(self, st: VehicleState) -> np.ndarray:
-        """R such that p_enu = R @ p_body."""
         cy, sy = math.cos(st.yaw), math.sin(st.yaw)
         cp, sp = math.cos(st.pitch), math.sin(st.pitch)
         cr, sr = math.cos(st.roll), math.sin(st.roll)

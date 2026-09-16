@@ -19,6 +19,7 @@ from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 
 from edge_sensor_sim.models import (
     GnssSimulator,
+    HaulWorld,
     ImuSimulator,
     LidarSimulator,
     VehicleSimulator,
@@ -96,10 +97,11 @@ class SensorSuiteNode(Node):
         self.frame_map = str(self.get_parameter('frame_map').value)
         self.publish_tf = bool(self.get_parameter('publish_tf').value)
 
-        self.vehicle = VehicleSimulator(speed_mps=speed)
+        world = HaulWorld(seed=19)
+        self.vehicle = VehicleSimulator(speed_mps=speed, world=world)
         self.imu_model = ImuSimulator()
         self.gnss_model = GnssSimulator()
-        self.lidar_model = LidarSimulator()
+        self.lidar_model = LidarSimulator(world=world)
 
         self.pub_imu = self.create_publisher(Imu, '/imu/data', qos_profile_sensor_data)
         self.pub_gnss = self.create_publisher(NavSatFix, '/gnss/fix', qos_profile_sensor_data)

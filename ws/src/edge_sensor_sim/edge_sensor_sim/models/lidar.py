@@ -1,114 +1,128 @@
-"""Synthetic LiDAR: ground plane, berms, rocks in body/lidar frame."""
+"""Realistic multi-ring LiDAR via polar ray casting (not a rectangular grid)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple
 
 import numpy as np
 
 from .vehicle import VehicleSimulator, VehicleState
+from .world import HaulWorld
 
 
 @dataclass
 class LidarFrame:
     t: float
-    points: np.ndarray  # Nx3 float32, lidar/body frame (m)
+    points: np.ndarray  # Nx3 float32 in body frame (m)
     intensity: np.ndarray  # N float32
 
 
 class LidarSimulator:
     """
-    Generates a forward haul-road cloud each tick:
-      - ground surface with mild undulation
-      - left/right berms
-      - fixed world rocks (spheres on the ground)
+    Spinning multi-layer LiDAR emulation:
 
-    Implemented as a structured sample of the height field (fast enough for ~10 Hz),
-    not a full GPU ray tracer.
+      - elevation rings + azimuth samples (polar pattern, not XY grid)
+      - binary-search ray cast against the haul-world height field
+      - range noise and random dropouts
+      - beams origin at cab-roof mount
+
+    Body frame: ROS x forward, y left, z up.
     """
 
     def __init__(
         self,
-        n_forward: int = 80,
-        n_lateral: int = 60,
-        forward_min_m: float = 2.0,
-        forward_max_m: float = 50.0,
-        lateral_span_m: float = 12.0,
-        noise_std_m: float = 0.02,
-        n_rocks: int = 10,
-        berm_height_m: float = 1.4,
-        berm_offset_y_m: float = 7.5,
+        n_rings: int = 16,
+        n_azimuth: int = 180,  # 2° if full circle
+        elev_min_deg: float = -18.0,
+        elev_max_deg: float = 3.0,
+        az_full_circle: bool = True,
+        min_range_m: float = 1.5,
+        max_range_m: float = 90.0,
+        ray_iters: int = 12,
+        noise_std_m: float = 0.03,
+        dropout_prob: float = 0.025,
+        world: HaulWorld | None = None,
         seed: int = 17,
+        mount_xyz: tuple[float, float, float] = (2.5, 0.0, 3.2),
     ) -> None:
-        self.n_fwd = int(n_forward)
-        self.n_lat = int(n_lateral)
-        self.fwd_min = float(forward_min_m)
-        self.fwd_max = float(forward_max_m)
-        self.lat_span = float(lateral_span_m)
+        self.world = world or HaulWorld(seed=seed + 5)
+        self.min_range = float(min_range_m)
+        self.max_range = float(max_range_m)
+        self.ray_iters = int(ray_iters)
         self.noise_std = float(noise_std_m)
-        self.berm_h = float(berm_height_m)
-        self.berm_y = float(berm_offset_y_m)
+        self.dropout_prob = float(dropout_prob)
+        self.mount = np.asarray(mount_xyz, dtype=float)
         self._rng = np.random.default_rng(seed)
 
-        self._rocks: List[Tuple[float, float, float]] = []
-        for i in range(int(n_rocks)):
-            sx = 20.0 + 10.0 * i + float(self._rng.uniform(-2.5, 2.5))
-            sy = float(self._rng.uniform(-5.5, 5.5))
-            sr = float(self._rng.uniform(0.3, 0.85))
-            self._rocks.append((sx, sy, sr))
+        elevs = np.linspace(np.deg2rad(elev_min_deg), np.deg2rad(elev_max_deg), int(n_rings))
+        if az_full_circle:
+            azs = np.linspace(-np.pi, np.pi, int(n_azimuth), endpoint=False)
+        else:
+            azs = np.linspace(-np.deg2rad(110), np.deg2rad(110), int(n_azimuth))
 
-    def _ground_z(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
-        return 0.05 * np.sin(0.08 * x) + 0.02 * np.sin(0.11 * y)
-
-    def _height_field(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
-        z = self._ground_z(x, y)
-        # Berms
-        for sign in (1.0, -1.0):
-            cy = sign * self.berm_y
-            d = np.abs(y - cy)
-            mask = d < 0.9
-            z = np.where(mask, z + self.berm_h * (1.0 - d / 0.9), z)
-        # Rocks
-        for rx, ry, rr in self._rocks:
-            d = np.hypot(x - rx, y - ry)
-            disk = d < rr
-            if np.any(disk):
-                rock_z = self._ground_z(np.array([rx]), np.array([ry]))[0] + np.sqrt(
-                    np.maximum(0.0, rr * rr - d * d)
-                )
-                z = np.where(disk, np.maximum(z, rock_z), z)
-        return z
+        el_g, az_g = np.meshgrid(elevs, azs, indexing='ij')
+        ce, se = np.cos(el_g), np.sin(el_g)
+        ca, sa = np.cos(az_g), np.sin(az_g)
+        # body: x fwd, y left, z up — az=0 forward
+        dirs = np.stack([ce * ca, ce * sa, se], axis=-1).reshape(-1, 3)
+        dirs /= np.linalg.norm(dirs, axis=1, keepdims=True).clip(min=1e-9)
+        self._dir = dirs.astype(np.float64)
+        self._n = dirs.shape[0]
 
     def sample(self, vehicle: VehicleSimulator, st: VehicleState) -> LidarFrame:
-        # Sample a grid in body XY (forward x, left y), lift to world height, back to body
-        xs = np.linspace(self.fwd_min, self.fwd_max, self.n_fwd)
-        ys = np.linspace(-self.lat_span, self.lat_span, self.n_lat)
-        xx, yy = np.meshgrid(xs, ys, indexing='xy')
-        # body points on z=0 plane as seeds
-        body = np.stack([xx.ravel(), yy.ravel(), np.zeros(xx.size)], axis=1)
-
-        # to ENU
         R = vehicle.R_body_from_enu(st)
         origin = np.array([st.x, st.y, st.z], dtype=float)
-        enu = (R @ body.T).T + origin
-        enu[:, 2] = self._height_field(enu[:, 0], enu[:, 1])
+        mount_enu = origin + R @ self.mount
+        dir_enu = (R @ self._dir.T).T
 
-        # back to body
-        body_pts = (R.T @ (enu - origin).T).T
-        if self.noise_std > 0:
-            body_pts = body_pts + self._rng.normal(0.0, self.noise_std, size=body_pts.shape)
+        lo = np.full(self._n, self.min_range, dtype=float)
+        hi = np.full(self._n, self.max_range, dtype=float)
 
-        # drop points behind or too close/far
-        rng = np.linalg.norm(body_pts, axis=1)
-        keep = (body_pts[:, 0] > 0.5) & (rng > 1.0) & (rng < self.fwd_max + 5.0)
-        body_pts = body_pts[keep]
+        # Binary search hit distance for all rays (vectorized)
+        for _ in range(self.ray_iters):
+            mid = 0.5 * (lo + hi)
+            pts = mount_enu[None, :] + dir_enu * mid[:, None]
+            surf = np.asarray(self.world.height(pts[:, 0], pts[:, 1]), dtype=float)
+            below = pts[:, 2] <= (surf + 0.06)
+            hi = np.where(below, mid, hi)
+            lo = np.where(~below, mid, lo)
 
-        intensity = (0.2 + 0.6 * np.clip(np.abs(body_pts[:, 2]) / 2.0, 0.0, 1.0)).astype(
-            np.float32
-        )
+        # Valid hit if final mid is under surface and not at max range only
+        r_hit = 0.5 * (lo + hi)
+        pts = mount_enu[None, :] + dir_enu * r_hit[:, None]
+        surf = np.asarray(self.world.height(pts[:, 0], pts[:, 1]), dtype=float)
+        hit = (pts[:, 2] <= surf + 0.12) & (r_hit < self.max_range * 0.995) & (r_hit > self.min_range)
+
+        if not np.any(hit):
+            return LidarFrame(
+                t=st.t,
+                points=np.zeros((0, 3), dtype=np.float32),
+                intensity=np.zeros((0,), dtype=np.float32),
+            )
+
+        idx = np.where(hit)[0]
+        # dropouts
+        keep = self._rng.random(idx.size) >= self.dropout_prob
+        idx = idx[keep]
+        if idx.size == 0:
+            return LidarFrame(
+                t=st.t,
+                points=np.zeros((0, 3), dtype=np.float32),
+                intensity=np.zeros((0,), dtype=np.float32),
+            )
+
+        r = r_hit[idx] + self._rng.normal(0.0, self.noise_std, size=idx.size)
+        r = np.clip(r, self.min_range, self.max_range)
+        p_enu = mount_enu[None, :] + dir_enu[idx] * r[:, None]
+        # snap to surface for ground consistency
+        p_enu[:, 2] = np.asarray(self.world.height(p_enu[:, 0], p_enu[:, 1]), dtype=float)
+        p_enu[:, 2] += self._rng.normal(0.0, self.noise_std * 0.4, size=idx.size)
+
+        p_body = (R.T @ (p_enu - origin).T).T
+        intensity = np.clip(1.15 - 0.01 * r, 0.12, 1.0).astype(np.float32)
+
         return LidarFrame(
             t=st.t,
-            points=body_pts.astype(np.float32),
+            points=p_body.astype(np.float32),
             intensity=intensity,
         )

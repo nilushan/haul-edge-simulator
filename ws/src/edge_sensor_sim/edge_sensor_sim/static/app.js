@@ -129,9 +129,10 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0x1a222c, 60, 180);
+// Very light distant fog only — keep most of the map visible
+scene.fog = new THREE.Fog(0x1a222c, 2500, 7000);
 
-const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 500);
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.5, 8000);
 camera.position.set(-20, 14, 24);
 
 // Orbit around a moving target (truck). In follow mode we slide camera+target together.
@@ -139,8 +140,8 @@ const controls = new OrbitControls(camera, canvas);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.maxPolarAngle = Math.PI * 0.48;
-controls.minDistance = 6;
-controls.maxDistance = 200;
+controls.minDistance = 5;
+controls.maxDistance = 5000;
 controls.enablePan = false; // follow default: orbit/zoom only; pan in free mode
 controls.panSpeed = 1.0;
 controls.zoomSpeed = 1.2;
@@ -161,14 +162,15 @@ scene.add(new THREE.AmbientLight(0x4a5560, 0.3));
 
 // Neutral reference plane under the truck (not sim geometry — LiDAR is the surface).
 // Follows vehicle XY so it stays under the ego; height tracks odom.z.
+// Subtle local pad under the truck only (map cloud is the real surface)
 const ground = new THREE.Mesh(
-  new THREE.CircleGeometry(70, 64),
+  new THREE.CircleGeometry(40, 48),
   new THREE.MeshStandardMaterial({
     color: 0x2a3340,
     roughness: 1,
     metalness: 0,
     transparent: true,
-    opacity: 0.55,
+    opacity: 0.35,
   }),
 );
 ground.rotation.x = -Math.PI / 2;
@@ -176,9 +178,9 @@ ground.position.y = -0.02;
 ground.receiveShadow = true;
 scene.add(ground);
 
-const grid = new THREE.GridHelper(120, 24, 0x3d4a58, 0x2a3340);
+const grid = new THREE.GridHelper(80, 16, 0x3d4a58, 0x2a3340);
 grid.position.y = 0.01;
-grid.material.opacity = 0.35;
+grid.material.opacity = 0.25;
 grid.material.transparent = true;
 scene.add(grid);
 
@@ -258,8 +260,10 @@ scene.add(trail);
 let trailCount = 0;
 
 // ——— Accumulated LiDAR map (world frame, pose-aligned frames) ———
-const MAP_MAX = 60000;
-const VOXEL = 0.35; // metres
+// Keep as much map as the browser can reasonably draw
+const MAP_MAX = 400000;
+const VOXEL = 0.4; // metres — slightly coarser = more area for same point budget
+const MAP_KEEP_RADIUS_M = 2500; // only prune beyond this from ego when over cap
 const mapVoxels = new Map(); // key -> {x,y,z,r,g,b} in Three space
 const mapPositions = new Float32Array(MAP_MAX * 3);
 const mapColors = new Float32Array(MAP_MAX * 3);
@@ -270,13 +274,17 @@ mapGeo.setDrawRange(0, 0);
 const mapCloud = new THREE.Points(
   mapGeo,
   new THREE.PointsMaterial({
-    size: 0.28,
+    size: 0.38,
     vertexColors: true,
     sizeAttenuation: true,
     transparent: true,
-    opacity: 0.92,
+    opacity: 0.72,
+    depthWrite: false,
   }),
 );
+// Avoid frustum culling hiding chunks when bounding sphere is stale/huge
+mapCloud.frustumCulled = false;
+mapCloud.renderOrder = 1;
 scene.add(mapCloud);
 
 // Current-scan highlight (body-frame points this tick)
@@ -290,26 +298,47 @@ scanGeo.setDrawRange(0, 0);
 const scanCloud = new THREE.Points(
   scanGeo,
   new THREE.PointsMaterial({
-    size: 0.4,
+    size: 0.85,
     vertexColors: true,
     sizeAttenuation: true,
     transparent: true,
     opacity: 1,
+    depthWrite: true,
   }),
 );
+scanCloud.frustumCulled = false;
+scanCloud.renderOrder = 2; // draw current frame on top
 scene.add(scanCloud);
 
 let lastLidarT = -1;
 let mapCount = 0;
+let mapGen = 0; // increments each integrated scan (for age tint)
 
-function heightColor(z, out, i) {
-  const t = Math.max(0, Math.min(1, (z + 0.15) / 1.8));
-  out[i] = (139 + (192 - 139) * t) / 255;
-  out[i + 1] = (90 + (132 - 90) * t) / 255;
-  out[i + 2] = (43 + (252 - 43) * t) / 255;
+/** Historical map: muted slate → dusty amber by height (not competing with live scan). */
+function mapHeightColor(z, age01, out, i) {
+  const h = Math.max(0, Math.min(1, (z + 0.1) / 1.6));
+  // base: cool gray-blue ground → muted brown high
+  const r0 = 0.28 + 0.22 * h;
+  const g0 = 0.34 + 0.10 * h;
+  const b0 = 0.42 - 0.12 * h;
+  // newer map points slightly brighter; older dimmer
+  const a = 0.55 + 0.45 * (1 - age01);
+  out[i] = r0 * a;
+  out[i + 1] = g0 * a;
+  out[i + 2] = b0 * a + 0.05;
+}
+
+/** Current scan only: high-contrast cyan → lime by height. */
+function scanHeightColor(z, out, i) {
+  const h = Math.max(0, Math.min(1, (z + 0.1) / 1.6));
+  // cyan ground → yellow-green obstacles
+  out[i] = 0.15 + 0.55 * h;
+  out[i + 1] = 0.95 - 0.15 * h;
+  out[i + 2] = 0.95 - 0.75 * h;
 }
 
 function rebuildMapGeometry() {
+  const genNow = Math.max(mapGen, 1);
   let i = 0;
   for (const v of mapVoxels.values()) {
     if (i >= MAP_MAX) break;
@@ -317,9 +346,8 @@ function rebuildMapGeometry() {
     mapPositions[j] = v.x;
     mapPositions[j + 1] = v.y;
     mapPositions[j + 2] = v.z;
-    mapColors[j] = v.r;
-    mapColors[j + 1] = v.g;
-    mapColors[j + 2] = v.b;
+    const age01 = Math.min(1, (genNow - (v.gen || 0)) / 80);
+    mapHeightColor(v.bz ?? 0, age01, mapColors, j);
     i += 1;
   }
   mapCount = i;
@@ -332,6 +360,7 @@ function rebuildMapGeometry() {
 function clearMap() {
   mapVoxels.clear();
   mapCount = 0;
+  mapGen = 0;
   mapGeo.setDrawRange(0, 0);
   lastLidarT = -1;
 }
@@ -352,7 +381,16 @@ function bodyRosToTruckLocal(bx, byLeft, bz, out) {
 }
 
 function pruneMapFarFrom(egoThree, maxKeep = MAP_MAX) {
+  const r2 = MAP_KEEP_RADIUS_M * MAP_KEEP_RADIUS_M;
+  // First drop anything beyond keep radius
+  for (const [k, v] of [...mapVoxels.entries()]) {
+    const dx = v.x - egoThree.x;
+    const dy = v.y - egoThree.y;
+    const dz = v.z - egoThree.z;
+    if (dx * dx + dy * dy + dz * dz > r2) mapVoxels.delete(k);
+  }
   if (mapVoxels.size <= maxKeep) return;
+  // Then drop farthest until under budget
   const ranked = [];
   for (const [k, v] of mapVoxels) {
     const dx = v.x - egoThree.x;
@@ -360,7 +398,7 @@ function pruneMapFarFrom(egoThree, maxKeep = MAP_MAX) {
     const dz = v.z - egoThree.z;
     ranked.push([k, dx * dx + dy * dy + dz * dz]);
   }
-  ranked.sort((a, b) => b[1] - a[1]); // farthest first
+  ranked.sort((a, b) => b[1] - a[1]);
   const excess = mapVoxels.size - maxKeep;
   for (let i = 0; i < excess; i++) mapVoxels.delete(ranked[i][0]);
 }
@@ -372,8 +410,8 @@ function appendLidarToMap(lidar, odom) {
   lastLidarT = lidar.t ?? lastLidarT;
 
   truck.updateMatrixWorld(true);
+  mapGen += 1;
   const invV = 1.0 / VOXEL;
-  const col = [0, 0, 0];
   const n = lidar.xy.length;
   const step = Math.max(1, Math.floor(n / 2000));
 
@@ -391,18 +429,18 @@ function appendLidarToMap(lidar, odom) {
     const iz = Math.floor(_world.z * invV);
     const key = `${ix},${iy},${iz}`;
 
-    heightColor(bz, col, 0);
     const prev = mapVoxels.get(key);
     if (!prev || bz >= (prev.bz ?? -999)) {
       mapVoxels.set(key, {
         x: (ix + 0.5) * VOXEL,
         y: (iy + 0.5) * VOXEL,
         z: (iz + 0.5) * VOXEL,
-        r: col[0],
-        g: col[1],
-        b: col[2],
         bz,
+        gen: mapGen,
       });
+    } else {
+      // refresh age so recently re-seen cells stay a bit brighter
+      prev.gen = mapGen;
     }
   }
 
@@ -414,8 +452,8 @@ function appendLidarToMap(lidar, odom) {
 
 let camMode = 'follow'; // follow | top | free
 let lastOdom = null;
-let followDist = 26;
-let followHeight = 12;
+let followDist = 40;
+let followHeight = 22;
 let followYawOff = 0.35; // rad side angle so you see the side/rear, not locked dead-center
 
 function frameBehindTruck(odom, dist = followDist, height = followHeight) {
@@ -446,7 +484,9 @@ function setCamMode(mode) {
     const t = enuToThree(lastOdom.x, lastOdom.y, lastOdom.z);
     t.y += 1.0;
     controls.target.copy(t);
-    camera.position.copy(enuToThree(lastOdom.x, lastOdom.y, lastOdom.z + 55));
+    // High overview so most of the accumulated corridor is in frame
+    camera.position.copy(enuToThree(lastOdom.x, lastOdom.y, lastOdom.z + 180));
+    followDist = 180;
     controls.update();
   }
 }
@@ -454,7 +494,7 @@ function setCamMode(mode) {
 // Wheel in follow mode: change chase distance (and still allow OrbitControls zoom)
 canvas.addEventListener('wheel', (e) => {
   if (camMode !== 'follow') return;
-  followDist = Math.min(120, Math.max(8, followDist + (e.deltaY > 0 ? 2.5 : -2.5)));
+  followDist = Math.min(800, Math.max(8, followDist + (e.deltaY > 0 ? 4 : -4)));
 }, { passive: true });
 
 window.addEventListener('keydown', (e) => {
@@ -566,10 +606,10 @@ function updateLidar(lidar, odom) {
     scanPositions[j] = _world.x;
     scanPositions[j + 1] = _world.y;
     scanPositions[j + 2] = _world.z;
-    heightColor(bz, col, 0);
-    scanColors[j] = Math.min(1, col[0] * 0.45 + 0.5);
-    scanColors[j + 1] = Math.min(1, col[1] * 0.45 + 0.55);
-    scanColors[j + 2] = Math.min(1, col[2] * 0.35 + 0.7);
+    scanHeightColor(bz, col, 0);
+    scanColors[j] = col[0];
+    scanColors[j + 1] = col[1];
+    scanColors[j + 2] = col[2];
     w += 1;
   }
   scanGeo.setDrawRange(0, w);
@@ -595,11 +635,9 @@ function updateCamera() {
     controls.target.copy(target);
     camera.position.copy(target).add(offset);
   } else if (camMode === 'top') {
-    const offset = new THREE.Vector3().subVectors(camera.position, controls.target);
-    controls.target.lerp(target, 0.2);
-    // Keep camera above target
-    const up = new THREE.Vector3(0, Math.max(30, offset.length()), 0.01);
-    camera.position.lerp(target.clone().add(up), 0.15);
+    controls.target.lerp(target, 0.25);
+    const up = new THREE.Vector3(0, Math.max(120, followDist), 0.01);
+    camera.position.lerp(target.clone().add(up), 0.2);
   }
   // free: OrbitControls only — world-fixed target, no auto move
 }

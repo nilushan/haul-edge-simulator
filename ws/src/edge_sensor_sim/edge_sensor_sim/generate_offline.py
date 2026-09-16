@@ -12,6 +12,7 @@ import numpy as np
 
 from edge_sensor_sim.models import (
     GnssSimulator,
+    HaulWorld,
     ImuSimulator,
     LidarSimulator,
     VehicleSimulator,
@@ -31,10 +32,11 @@ def main(argv: list[str] | None = None) -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    vehicle = VehicleSimulator()
+    world = HaulWorld(seed=19)
+    vehicle = VehicleSimulator(world=world)
     imu = ImuSimulator()
     gnss = GnssSimulator()
-    lidar = LidarSimulator()
+    lidar = LidarSimulator(world=world)
 
     # timelines
     t_end = float(args.seconds)

@@ -63,14 +63,14 @@
       <canvas id="chartGyro" height="110"></canvas>
       <h2>Speed <small>km/h</small> · vertical load <small>g</small></h2>
       <canvas id="chartSpeed" height="90"></canvas>
-      <p class="hint">1 follow (drag orbit · wheel zoom · tracks truck) · 2 top · 3 free pan/orbit · M clear map</p>
+      <p class="hint">1 follow · 2 top (wide overview) · 3 free · wheel zoom out for full corridor · M clear map · map keeps ~2.5 km / 400k voxels</p>
     </aside>
 
     <div class="overlay legend">
-      <span class="swatch ground"></span> map ground
-      <span class="swatch rock"></span> map high
-      <span class="swatch berm"></span> live scan
-      <span class="swatch truck"></span> truck / trail
+      <span class="swatch map-old"></span> prior map (older)
+      <span class="swatch map-new"></span> prior map (recent)
+      <span class="swatch scan-now"></span> current LiDAR frame
+      <span class="swatch truck"></span> truck / path
     </div>
   </div>
 </body>
