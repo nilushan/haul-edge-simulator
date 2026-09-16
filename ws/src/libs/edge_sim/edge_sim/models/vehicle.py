@@ -59,9 +59,12 @@ class VehicleSimulator:
         world: HaulWorld | None = None,
         seed: int = 7,
     ) -> None:
+        if not math.isfinite(speed_mps) or speed_mps <= 0:
+            raise ValueError('speed_mps must be a positive finite value')
         self.world = world or HaulWorld(seed=seed + 3)
         self.speed_cmd = float(speed_mps)
-        self._rng = np.random.default_rng(seed)
+        self._seed = int(seed)
+        self._rng = np.random.default_rng(self._seed)
 
         self._t = 0.0
         self._s = 0.0  # station along route
@@ -76,6 +79,8 @@ class VehicleSimulator:
         self._z = 0.0
         self._pitch = 0.0
         self._roll = 0.0
+        self._vx = self._speed * math.cos(self._yaw)
+        self._vy = self._speed * math.sin(self._yaw)
         self._vz = 0.0
 
         self._next_speed_s = float(self._rng.uniform(10.0, 18.0))
@@ -89,8 +94,11 @@ class VehicleSimulator:
         # snap to route start
         self._x, self._y, self._yaw = self.world.centerline(0.0)
         self._z = float(self.world.height(self._x, self._y))
+        self._vx = self._speed * math.cos(self._yaw)
+        self._vy = self._speed * math.sin(self._yaw)
 
     def reset(self, t0: float = 0.0) -> None:
+        self._rng = np.random.default_rng(self._seed)
         self._t = t0
         self._s = 0.0
         self._prev = None
@@ -100,12 +108,15 @@ class VehicleSimulator:
         self._z = float(self.world.height(self._x, self._y))
         self._pitch = 0.0
         self._roll = 0.0
+        self._vx = self._speed * math.cos(self._yaw)
+        self._vy = self._speed * math.sin(self._yaw)
         self._vz = 0.0
         self._yaw_rate = 0.0
-        self._next_speed_s = float(self._rng.uniform(10.0, 18.0))
-        self._next_bump_s = float(self._rng.uniform(8.0, 14.0))
+        self._next_speed_s = t0 + float(self._rng.uniform(10.0, 18.0))
+        self._next_bump_s = t0 + float(self._rng.uniform(8.0, 14.0))
         self._bump_amp = 0.0
         self._bump_t0 = -1.0
+        self._last_ax = self._last_ay = self._last_az = 0.0
 
     def _step_once(self, t: float, dt: float) -> None:
         # Grade-aware speed target
@@ -125,21 +136,31 @@ class VehicleSimulator:
                 np.clip(self.speed_cmd * grade_factor, 4.0, self.speed_cmd + 1.2)
             )
 
+        speed_prev = self._speed
+        x_prev, y_prev = self._x, self._y
         self._speed = _exp_smooth(self._speed, self._speed_target, dt, tau=2.0)
 
-        self._s += self._speed * dt
+        # The centerline parameter is not exact arc length. Scale its advance
+        # by the local derivative so world displacement matches speed_mps.
+        c0x, c0y, _ = self.world.centerline(self._s)
+        c1x, c1y, _ = self.world.centerline(self._s + 0.25)
+        metres_per_param = max(math.hypot(c1x - c0x, c1y - c0y) / 0.25, 1e-3)
+        self._s += self._speed * dt / metres_per_param
         cx, cy, path_yaw = self.world.centerline(self._s)
         _, _, yaw_ahead = self.world.centerline(self._s + 8.0)
         dyaw = _wrap_pi(yaw_ahead - path_yaw)
         yaw_rate_cmd = dyaw / 8.0 * self._speed
 
         self._yaw_rate = _exp_smooth(self._yaw_rate, yaw_rate_cmd, dt, tau=0.5)
-        self._yaw = _wrap_pi(_exp_smooth(self._yaw, path_yaw, dt, tau=0.35))
+        yaw_alpha = 1.0 - math.exp(-dt / 0.35)
+        self._yaw = _wrap_pi(self._yaw + yaw_alpha * _wrap_pi(path_yaw - self._yaw))
 
         lat_noise = 0.15 * math.sin(0.05 * self._s)
         nx, ny = -math.sin(path_yaw), math.cos(path_yaw)
         self._x = cx + nx * lat_noise
         self._y = cy + ny * lat_noise
+        self._vx = (self._x - x_prev) / dt
+        self._vy = (self._y - y_prev) / dt
 
         z_road = float(self.world.height(self._x, self._y))
         bump_az = 0.0
@@ -166,11 +187,10 @@ class VehicleSimulator:
         roll_tgt = float(np.clip(-0.035 * ay_body, -0.08, 0.08))
         self._roll = _exp_smooth(self._roll, roll_tgt, dt, tau=0.5)
 
-        self._last_ax = float(np.clip((self._speed_target - self._speed) / 2.0, -1.2, 0.9))
+        self._last_ax = float(np.clip((self._speed - speed_prev) / dt, -1.2, 0.9))
         self._last_ay = float(ay_body)
-        self._last_az = float(np.clip(az_spring, -4.0, 4.0))
-        self._last_pitch_rate = 0.0
-        self._last_roll_rate = 0.0
+        az_body = az_spring * math.cos(self._pitch) * math.cos(self._roll)
+        self._last_az = float(np.clip(az_body, -4.0, 4.0))
 
     def step(self, t: float) -> VehicleState:
         # Sub-step so large jumps (tests / hitch) stay stable
@@ -201,8 +221,8 @@ class VehicleSimulator:
             yaw=self._yaw,
             pitch=self._pitch,
             roll=self._roll,
-            vx=self._speed * math.cos(self._yaw),
-            vy=self._speed * math.sin(self._yaw),
+            vx=self._vx,
+            vy=self._vy,
             vz=self._vz,
             yaw_rate=self._yaw_rate,
             pitch_rate=pitch_rate,

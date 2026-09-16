@@ -65,7 +65,24 @@ def detect_rocks(
     height-above-ground aligned with `points`.
     """
     p = params or RockParams()
-    if points.size == 0:
+    points = np.asarray(points)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError('points must have shape (N, 3)')
+    if p.cluster_eps_m <= 0 or p.min_points < 1:
+        raise ValueError('cluster_eps_m and min_points must be positive')
+    if points.shape[0] == 0:
+        return []
+
+    if hag is not None:
+        hag = np.asarray(hag)
+        if hag.ndim != 1 or hag.shape[0] != points.shape[0]:
+            raise ValueError('hag must have shape (N,) aligned with points')
+    finite = np.all(np.isfinite(points), axis=1)
+    if hag is not None:
+        finite &= np.isfinite(hag)
+        hag = hag[finite]
+    points = points[finite]
+    if points.shape[0] == 0:
         return []
 
     clusters = _euclidean_clusters(points, p.cluster_eps_m, p.min_points)
@@ -77,8 +94,10 @@ def detect_rocks(
         r = float(np.percentile(radii, 90.0))
         e0, e1, e2 = pca_extents(pts)
         elong = (e0 / max(e1, 1e-3)) if e1 > 1e-6 else 99.0
-        hag_vals = hag[idx] if hag is not None else pts[:, 2]
-        hag_mean = float(np.nanmean(hag_vals)) if np.size(hag_vals) else 0.0
+        # Without an external ground model, use the cluster's lowest return as
+        # a translation-invariant height proxy instead of absolute map/body Z.
+        hag_vals = hag[idx] if hag is not None else pts[:, 2] - np.min(pts[:, 2])
+        hag_mean = float(np.mean(hag_vals)) if np.size(hag_vals) else 0.0
 
         range_m = float(np.linalg.norm(centroid[:2]))
         if float(centroid[0]) < p.min_range_m or range_m < p.min_range_m:

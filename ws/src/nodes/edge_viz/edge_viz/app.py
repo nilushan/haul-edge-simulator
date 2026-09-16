@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Any, List, Optional, Set
@@ -24,6 +25,8 @@ STATIC_DIR = Path(__file__).resolve().parent / 'static'
 
 def create_app(hub: Any, ws_hz: float = 10.0) -> web.Application:
     """Build aiohttp app that only *reads* a tick source (StreamHub or bus buffer)."""
+    if not math.isfinite(ws_hz) or ws_hz <= 0:
+        raise ValueError('ws_hz must be positive and finite')
     app = web.Application()
     app['hub'] = hub
     app['ws_clients']: Set[web.WebSocketResponse] = set()
@@ -88,17 +91,17 @@ def create_app(hub: Any, ws_hz: float = 10.0) -> web.Application:
         snap = hub.snapshot()
         return web.json_response(
             {
-                'duration_s': c.duration_s,
-                'loop': c.loop,
-                'imu_hz': c.imu_hz,
-                'gnss_hz': c.gnss_hz,
-                'lidar_hz': c.lidar_hz,
-                'mode': c.mode,
-                'cycle_maps': c.cycle_maps,
+                'duration_s': getattr(c, 'duration_s', snap.get('duration_s', 0.0)),
+                'loop': getattr(c, 'loop', snap.get('loop', True)),
+                'imu_hz': getattr(c, 'imu_hz', 0.0),
+                'gnss_hz': getattr(c, 'gnss_hz', 0.0),
+                'lidar_hz': getattr(c, 'lidar_hz', 0.0),
+                'mode': getattr(c, 'mode', snap.get('mode', 'bus')),
+                'cycle_maps': getattr(c, 'cycle_maps', False),
                 'map_id': snap.get('map_id'),
                 'stream_id': snap.get('stream_id'),
                 'source': snap.get('source'),
-                'history_s': c.history_s,
+                'history_s': getattr(c, 'history_s', snap.get('duration_s', 0.0)),
             }
         )
 
@@ -111,6 +114,8 @@ def create_app(hub: Any, ws_hz: float = 10.0) -> web.Application:
             body = await request.json()
         except json.JSONDecodeError as exc:
             raise web.HTTPBadRequest(text='invalid JSON') from exc
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text='JSON body must be an object')
         try:
             if 'map_id' in body and body['map_id']:
                 hub.set_map(str(body['map_id']))
@@ -136,6 +141,8 @@ def create_app(hub: Any, ws_hz: float = 10.0) -> web.Application:
                     try:
                         data = json.loads(msg.data)
                     except json.JSONDecodeError:
+                        continue
+                    if not isinstance(data, dict):
                         continue
                     if data.get('cmd') == 'snapshot':
                         await ws.send_json({'type': 'snapshot', **hub.snapshot()})
@@ -192,6 +199,12 @@ def create_app(hub: Any, ws_hz: float = 10.0) -> web.Application:
         task = app.get('pump_task')
         if task:
             task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        for ws in list(app['ws_clients']):
+            await ws.close(code=1001, message=b'server shutdown')
         hub.stop()
 
     app.on_startup.append(on_start)

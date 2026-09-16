@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import os
-import struct
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -21,6 +20,7 @@ from edge_sim.topics import SensorBusContract
 from edge_sim.maps import DEFAULT_PLAYLIST
 from edge_sim.stream.format import default_streams_root
 from edge_sim.stream import StreamConfig, StreamHub
+from edge_sensor_source.conversion import lidar_arrays as _lidar_arrays, xyzi_bytes
 
 
 def points_to_cloud(
@@ -28,14 +28,17 @@ def points_to_cloud(
     intensity: np.ndarray,
     header: Header,
 ) -> PointCloud2:
-    """Pack xyz + intensity float32 PointCloud2."""
+    """Pack aligned xyz + intensity arrays into a PointCloud2."""
+    points = np.asarray(points, dtype=np.float32)
+    intensity = np.asarray(intensity, dtype=np.float32)
+    data = xyzi_bytes(points, intensity)
     n = int(points.shape[0])
     msg = PointCloud2()
     msg.header = header
     msg.height = 1
     msg.width = n
     msg.is_bigendian = False
-    msg.is_dense = True
+    msg.is_dense = bool(np.all(np.isfinite(points)) and np.all(np.isfinite(intensity)))
     msg.fields = [
         PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
         PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
@@ -44,37 +47,8 @@ def points_to_cloud(
     ]
     msg.point_step = 16
     msg.row_step = msg.point_step * n
-    buf = bytearray(msg.row_step)
-    for i in range(n):
-        struct.pack_into(
-            '<ffff',
-            buf,
-            i * 16,
-            float(points[i, 0]),
-            float(points[i, 1]),
-            float(points[i, 2]),
-            float(intensity[i]) if i < len(intensity) else 0.0,
-        )
-    msg.data = bytes(buf)
+    msg.data = data
     return msg
-
-
-def _lidar_arrays(lidar: Dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
-    xy = np.asarray(lidar.get('xy') or [], dtype=np.float32)
-    z = np.asarray(lidar.get('z') or [], dtype=np.float32)
-    inten = np.asarray(lidar.get('i') or [], dtype=np.float32)
-    if xy.size == 0:
-        return np.zeros((0, 3), dtype=np.float32), np.zeros((0,), dtype=np.float32)
-    if xy.ndim == 1:
-        xy = xy.reshape(-1, 2)
-    n = xy.shape[0]
-    pts = np.zeros((n, 3), dtype=np.float32)
-    pts[:, :2] = xy[:n]
-    if z.size:
-        pts[:, 2] = z[:n]
-    if inten.size < n:
-        inten = np.resize(inten, n)
-    return pts, inten.astype(np.float32)
 
 
 class SensorSourceNode(Node):
@@ -141,9 +115,9 @@ class SensorSourceNode(Node):
                 duration_s=duration_s,
                 loop=True,
                 cycle_maps=cycle_maps,
-                imu_hz=min(imu_hz, 50.0),  # hub internal rates; ROS pub rates separate
+                imu_hz=imu_hz,
                 gnss_hz=gnss_hz,
-                lidar_hz=min(lidar_hz, 10.0),
+                lidar_hz=lidar_hz,
                 vehicle_hz=odom_hz,
                 history_s=duration_s,
                 speed_mps=speed,
@@ -180,6 +154,7 @@ class SensorSourceNode(Node):
         self._last_gnss_t = -1.0
         self._last_lidar_t = -1.0
         self._last_odom_t = -1.0
+        self._bad_samples = 0
 
         if self._owns_hub:
             self.hub.start()
@@ -196,7 +171,10 @@ class SensorSourceNode(Node):
 
     def destroy_node(self) -> bool:
         if self._owns_hub:
-            self.hub.stop()
+            try:
+                self.hub.stop()
+            except RuntimeError as exc:
+                self.get_logger().error(f'failed to stop StreamHub cleanly: {exc}')
         return super().destroy_node()
 
     def _header(self, frame_id: str) -> Header:
@@ -208,40 +186,54 @@ class SensorSourceNode(Node):
     def _publish_static_tf(self) -> None:
         assert self._static_tf is not None
         statics = []
-        for child, z in ((self.frame_imu, 0.0), (self.frame_lidar, 2.5)):
+        for child, xyz in (
+            (self.frame_imu, (0.0, 0.0, 0.0)),
+            (self.frame_lidar, (2.5, 0.0, 3.2)),
+        ):
             tf = TransformStamped()
             tf.header.stamp = self.get_clock().now().to_msg()
             tf.header.frame_id = self.frame_base
             tf.child_frame_id = child
-            tf.transform.translation.x = 0.0
-            tf.transform.translation.y = 0.0
-            tf.transform.translation.z = float(z)
+            tf.transform.translation.x = float(xyz[0])
+            tf.transform.translation.y = float(xyz[1])
+            tf.transform.translation.z = float(xyz[2])
             tf.transform.rotation.w = 1.0
             statics.append(tf)
         self._static_tf.sendTransform(statics)
 
+    def _publish_new_sample(
+        self,
+        kind: str,
+        sample: Optional[Dict[str, Any]],
+        last_attr: str,
+        publish: Any,
+    ) -> None:
+        if not sample:
+            return
+        try:
+            timestamp = float(sample.get('t', -1.0))
+        except (TypeError, ValueError, AttributeError):
+            self._bad_samples += 1
+            self.get_logger().warn(f'ignoring malformed {kind} sample timestamp')
+            return
+        if not np.isfinite(timestamp) or timestamp <= float(getattr(self, last_attr)):
+            return
+        try:
+            publish(sample)
+        except (KeyError, TypeError, ValueError, IndexError) as exc:
+            self._bad_samples += 1
+            setattr(self, last_attr, timestamp)
+            self.get_logger().warn(f'ignoring malformed {kind} sample: {exc}')
+            return
+        setattr(self, last_attr, timestamp)
+
     def _on_poll(self) -> None:
         snap = self.hub.snapshot()
-        imu = snap['latest'].get('imu')
-        gnss = snap['latest'].get('gnss')
-        odom = snap['latest'].get('odom')
-        lidar = snap.get('lidar')
-
-        if imu and float(imu.get('t', -1.0)) > self._last_imu_t:
-            self._last_imu_t = float(imu['t'])
-            self._publish_imu(imu)
-
-        if gnss and float(gnss.get('t', -1.0)) > self._last_gnss_t:
-            self._last_gnss_t = float(gnss['t'])
-            self._publish_gnss(gnss)
-
-        if odom and float(odom.get('t', -1.0)) > self._last_odom_t:
-            self._last_odom_t = float(odom['t'])
-            self._publish_odom(odom)
-
-        if lidar and float(lidar.get('t', -1.0)) > self._last_lidar_t:
-            self._last_lidar_t = float(lidar['t'])
-            self._publish_lidar(lidar)
+        latest = snap.get('latest') or {}
+        self._publish_new_sample('imu', latest.get('imu'), '_last_imu_t', self._publish_imu)
+        self._publish_new_sample('gnss', latest.get('gnss'), '_last_gnss_t', self._publish_gnss)
+        self._publish_new_sample('odom', latest.get('odom'), '_last_odom_t', self._publish_odom)
+        self._publish_new_sample('lidar', snap.get('lidar'), '_last_lidar_t', self._publish_lidar)
 
     def _publish_imu(self, s: Dict[str, Any]) -> None:
         msg = Imu()
@@ -263,9 +255,11 @@ class SensorSourceNode(Node):
         msg.longitude = float(s['lon'])
         msg.altitude = float(s['alt'])
         msg.position_covariance_type = NavSatFix.COVARIANCE_TYPE_APPROXIMATED
-        msg.position_covariance[0] = 2.25
-        msg.position_covariance[4] = 2.25
-        msg.position_covariance[8] = 9.0
+        h_acc = max(0.0, float(s.get('h_acc_m', 1.5)))
+        v_acc = max(0.0, float(s.get('v_acc_m', 3.0)))
+        msg.position_covariance[0] = h_acc * h_acc
+        msg.position_covariance[4] = h_acc * h_acc
+        msg.position_covariance[8] = v_acc * v_acc
         fix_ok = bool(s.get('fix_ok', True))
         msg.status.status = (
             NavSatStatus.STATUS_SBAS_FIX if fix_ok else NavSatStatus.STATUS_NO_FIX
@@ -275,7 +269,9 @@ class SensorSourceNode(Node):
 
     def _publish_lidar(self, fr: Dict[str, Any]) -> None:
         pts, inten = _lidar_arrays(fr)
-        header = self._header(self.frame_lidar)
+        # LidarSimulator returns points in base_link coordinates; publish that
+        # frame while retaining the accurate base->lidar static mount TF.
+        header = self._header(self.frame_base)
         cloud = points_to_cloud(pts, inten, header)
         self.pub_lidar.publish(cloud)
 
@@ -316,8 +312,11 @@ def main(args: Optional[List[str]] = None) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            node.destroy_node()
+        finally:
+            if rclpy.ok():
+                rclpy.shutdown()
 
 
 if __name__ == '__main__':

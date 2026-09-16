@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import List, Optional, Tuple
 
 import rclpy
@@ -15,6 +16,7 @@ from std_msgs.msg import String
 
 from edge_perception.vibration import ImuSample, VibrationMonitor, VibeParams
 from edge_sim.topics import SensorBusContract
+from edge_vibe_detect.health import is_fresh, validate_thresholds
 
 
 class VibeDetectNode(Node):
@@ -32,20 +34,44 @@ class VibeDetectNode(Node):
         self.declare_parameter('peak_warn', 4.0)
         self.declare_parameter('peak_crit', 6.0)
         self.declare_parameter('min_speed_mps', 1.0)
+        self.declare_parameter('window_s', 1.0)
+        self.declare_parameter('hop_s', 0.2)
+        self.declare_parameter('hold_s', 0.8)
+        self.declare_parameter('min_samples', 10)
+        self.declare_parameter('max_gap_s', 0.25)
+        self.declare_parameter('odom_timeout_s', 1.0)
 
+        rms_warn = float(self.get_parameter('rms_warn').value)
+        rms_crit = float(self.get_parameter('rms_crit').value)
+        peak_warn = float(self.get_parameter('peak_warn').value)
+        peak_crit = float(self.get_parameter('peak_crit').value)
+        min_speed_mps = float(self.get_parameter('min_speed_mps').value)
+        validate_thresholds(rms_warn, rms_crit, peak_warn, peak_crit, min_speed_mps)
         params = VibeParams(
-            rms_warn=float(self.get_parameter('rms_warn').value),
-            rms_crit=float(self.get_parameter('rms_crit').value),
-            peak_warn=float(self.get_parameter('peak_warn').value),
-            peak_crit=float(self.get_parameter('peak_crit').value),
-            min_speed_mps=float(self.get_parameter('min_speed_mps').value),
+            window_s=float(self.get_parameter('window_s').value),
+            hop_s=float(self.get_parameter('hop_s').value),
+            hold_s=float(self.get_parameter('hold_s').value),
+            min_samples=int(self.get_parameter('min_samples').value),
+            max_gap_s=float(self.get_parameter('max_gap_s').value),
+            rms_warn=rms_warn,
+            rms_crit=rms_crit,
+            peak_warn=peak_warn,
+            peak_crit=peak_crit,
+            min_speed_mps=min_speed_mps,
         )
         self.monitor = VibrationMonitor(params)
         self.vehicle_id = str(self.get_parameter('vehicle_id').value)
         self._speed = 0.0
         self._pose: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self._odom_received_at: Optional[float] = None
+        self._odom_timeout_s = float(self.get_parameter('odom_timeout_s').value)
+        if self._odom_timeout_s <= 0:
+            raise ValueError('odom_timeout_s must be positive')
         self._samples = 0
         self._alerts = 0
+        self._last_imu_t: Optional[float] = None
+        self._last_feature_t: Optional[float] = None
+        self._zero_stamp_warned = False
 
         imu_topic = str(self.get_parameter('imu_topic').value)
         odom_topic = str(self.get_parameter('odom_topic').value)
@@ -62,11 +88,19 @@ class VibeDetectNode(Node):
         self._speed = float((tw.linear.x ** 2 + tw.linear.y ** 2) ** 0.5)
         p = msg.pose.pose.position
         self._pose = (float(p.x), float(p.y), float(p.z))
+        self._odom_received_at = time.monotonic()
 
     def _on_imu(self, msg: Imu) -> None:
-        t = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        sensor_t = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        ros_now = float(self.get_clock().now().nanoseconds) * 1e-9
+        if sensor_t <= 0.0:
+            sensor_t = ros_now
+            if not self._zero_stamp_warned:
+                self.get_logger().warn('IMU stamp is zero; using ROS receive time')
+                self._zero_stamp_warned = True
+        self._last_imu_t = sensor_t
         sample = ImuSample(
-            t=t,
+            t=sensor_t,
             ax=float(msg.linear_acceleration.x),
             ay=float(msg.linear_acceleration.y),
             az=float(msg.linear_acceleration.z),
@@ -75,19 +109,21 @@ class VibeDetectNode(Node):
         feat = self.monitor.push(sample)
         if feat is None:
             return
+        self._last_feature_t = feat.t
         fmsg = String()
         fmsg.data = json.dumps(self.monitor.features_dict(feat))
         self.pub_feat.publish(fmsg)
 
+        odom_ok = is_fresh(self._odom_received_at, time.monotonic(), self._odom_timeout_s)
         alert = self.monitor.evaluate(
             feat,
-            speed_mps=self._speed,
+            speed_mps=self._speed if odom_ok else float('nan'),
             vehicle_id=self.vehicle_id,
             source_node='edge_vibe_detect',
             pose=self._pose,
         )
         if alert is not None:
-            alert.t_ros = t
+            alert.t_ros = ros_now
             amsg = String()
             amsg.data = json.dumps(alert.to_dict())
             self.pub_alert.publish(amsg)
@@ -97,13 +133,21 @@ class VibeDetectNode(Node):
             )
 
     def _heartbeat(self) -> None:
+        now = time.monotonic()
+        odom_ok = is_fresh(self._odom_received_at, now, self._odom_timeout_s)
+        odom_age = None if self._odom_received_at is None else max(0.0, now - self._odom_received_at)
         msg = String()
         msg.data = json.dumps(
             {
                 'node': 'edge_vibe_detect',
+                'vehicle_id': self.vehicle_id,
                 'samples': self._samples,
                 'alerts': self._alerts,
-                'speed_mps': self._speed,
+                'speed_mps': self._speed if odom_ok else None,
+                'odom_ok': odom_ok,
+                'odom_age_s': odom_age,
+                'last_imu_t': self._last_imu_t,
+                'last_feature_t': self._last_feature_t,
             }
         )
         self.pub_status.publish(msg)
@@ -117,8 +161,11 @@ def main(args: Optional[List[str]] = None) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            node.destroy_node()
+        finally:
+            if rclpy.ok():
+                rclpy.shutdown()
 
 
 if __name__ == '__main__':

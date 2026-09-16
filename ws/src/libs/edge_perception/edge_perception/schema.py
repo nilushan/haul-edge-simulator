@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from enum import IntEnum
 from typing import Any, Dict, List, Optional
-import time
 import uuid
 
 
@@ -73,7 +72,7 @@ class AlertEvent:
     source_node: str = ''
     vehicle_id: str = 'haul-01'
     frame_id: str = 'map'
-    t_ros: float = 0.0
+    t_ros: Optional[float] = None
     t_vehicle: float = 0.0
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     x: float = 0.0
@@ -90,7 +89,7 @@ class AlertEvent:
         return {
             'schema': 'edge.alert.v1',
             'event_id': self.event_id,
-            't_ros': self.t_ros or time.time(),
+            't_ros': self.t_ros,
             't_vehicle': self.t_vehicle,
             'vehicle_id': self.vehicle_id,
             'source_node': self.source_node,

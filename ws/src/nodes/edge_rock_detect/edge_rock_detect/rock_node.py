@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import json
+import math
+import time
 from typing import List, Optional
 
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import String
 
@@ -19,6 +22,7 @@ from edge_perception.ground import estimate_ground_grid
 from edge_perception.rocks import RockParams, detect_rocks
 from edge_perception.schema import AlertEvent, DetectionSet, Label, Severity
 from edge_sim.topics import SensorBusContract
+from edge_rock_detect.tracking import Pose2D, SpatialDeduplicator, body_to_map
 
 
 class RockDetectNode(Node):
@@ -35,18 +39,36 @@ class RockDetectNode(Node):
         self.declare_parameter('vehicle_id', 'haul-01')
         self.declare_parameter('alert_min_conf', 0.7)
         self.declare_parameter('publish_ground', True)
+        self.declare_parameter('odom_topic', c.odom_topic)
+        self.declare_parameter('odom_timeout_s', 1.0)
+        self.declare_parameter('dedup_cell_m', 2.0)
+        self.declare_parameter('dedup_ttl_s', 120.0)
+        self.declare_parameter('max_cluster_points', 2000)
+        self.declare_parameter('frame_map', c.frame_map)
 
         self.vehicle_id = str(self.get_parameter('vehicle_id').value)
         self.alert_min_conf = float(self.get_parameter('alert_min_conf').value)
         self.publish_ground = bool(self.get_parameter('publish_ground').value)
+        self.frame_map = str(self.get_parameter('frame_map').value)
         self._params = RockParams()
         self._frames = 0
         self._alerts = 0
-        self._seen_keys: set[str] = set()
+        self._bad_frames = 0
+        self._pose: Optional[Pose2D] = None
+        self._pose_received_at = -1e9
+        self._odom_timeout_s = float(self.get_parameter('odom_timeout_s').value)
+        self._max_cluster_points = int(self.get_parameter('max_cluster_points').value)
+        if self._odom_timeout_s <= 0 or self._max_cluster_points < 1:
+            raise ValueError('odom_timeout_s and max_cluster_points must be positive')
+        self._dedup = SpatialDeduplicator(
+            cell_m=float(self.get_parameter('dedup_cell_m').value),
+            ttl_s=float(self.get_parameter('dedup_ttl_s').value),
+        )
 
         lidar = str(self.get_parameter('lidar_topic').value)
+        self._rocks_cloud_topic = str(self.get_parameter('rocks_cloud_topic').value)
         self.pub_rocks = self.create_publisher(
-            PointCloud2, str(self.get_parameter('rocks_cloud_topic').value), qos_profile_sensor_data
+            PointCloud2, self._rocks_cloud_topic, qos_profile_sensor_data
         )
         self.pub_obs = self.create_publisher(
             PointCloud2, str(self.get_parameter('obstacles_cloud_topic').value), qos_profile_sensor_data
@@ -58,10 +80,33 @@ class RockDetectNode(Node):
         self.pub_alert = self.create_publisher(String, str(self.get_parameter('alerts_topic').value), 10)
         self.pub_status = self.create_publisher(String, str(self.get_parameter('status_topic').value), 10)
         self.create_subscription(PointCloud2, lidar, self._on_lidar, qos_profile_sensor_data)
+        self.create_subscription(
+            Odometry,
+            str(self.get_parameter('odom_topic').value),
+            self._on_odom,
+            10,
+        )
         self.create_timer(2.0, self._heartbeat)
         self.get_logger().info(f'edge_rock_detect listening on {lidar}')
 
+    def _on_odom(self, msg: Odometry) -> None:
+        position = msg.pose.pose.position
+        q = msg.pose.pose.orientation
+        yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+        )
+        self._pose = Pose2D(float(position.x), float(position.y), float(position.z), float(yaw))
+        self._pose_received_at = time.monotonic()
+
     def _on_lidar(self, msg: PointCloud2) -> None:
+        try:
+            self._process_lidar(msg)
+        except (ValueError, TypeError, IndexError) as exc:
+            self._bad_frames += 1
+            self.get_logger().warn(f'ignoring malformed lidar frame: {exc}')
+
+    def _process_lidar(self, msg: PointCloud2) -> None:
         pts, _inten = decode_xyz(msg)
         if pts.size == 0:
             return
@@ -75,6 +120,10 @@ class RockDetectNode(Node):
         ground = pts[gr.ground_idx]
         obs = pts[gr.obstacle_idx]
         hag_obs = gr.hag[gr.obstacle_idx]
+        if obs.shape[0] > self._max_cluster_points:
+            keep = np.linspace(0, obs.shape[0] - 1, self._max_cluster_points).astype(int)
+            obs = obs[keep]
+            hag_obs = hag_obs[keep]
 
         if self.publish_ground and ground.shape[0]:
             labels = np.full((ground.shape[0],), float(Label.GROUND), dtype=np.float32)
@@ -116,22 +165,33 @@ class RockDetectNode(Node):
                 )
             )
 
-        t = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
-        dset = DetectionSet(t=t, frame_id=msg.header.frame_id or 'base_link', source_node='edge_rock_detect', detections=dets)
+        sensor_t = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        ros_now = float(self.get_clock().now().nanoseconds) * 1e-9
+        t_ros = sensor_t if sensor_t > 0.0 else ros_now
+        input_frame = msg.header.frame_id or 'base_link'
+        for detection in dets:
+            detection.frame_id = input_frame
+        dset = DetectionSet(t=sensor_t, frame_id=input_frame, source_node='edge_rock_detect', detections=dets)
         s = String()
         s.data = json.dumps(dset.to_dict())
         self.pub_det.publish(s)
 
+        monotonic_now = time.monotonic()
+        pose_fresh = (
+            self._pose is not None
+            and monotonic_now - self._pose_received_at <= self._odom_timeout_s
+        )
         for d in dets:
             if d.confidence < self.alert_min_conf:
                 continue
-            # spatial dedup key (coarse grid)
-            key = f'{int(d.x // 2)}:{int(d.y // 2)}'
-            if key in self._seen_keys:
+            if pose_fresh and self._pose is not None:
+                alert_x, alert_y, alert_z = body_to_map(d.x, d.y, d.z, self._pose)
+                alert_frame = self.frame_map
+            else:
+                alert_x, alert_y, alert_z = d.x, d.y, d.z
+                alert_frame = input_frame
+            if self._dedup.seen_recently(alert_x, alert_y, monotonic_now):
                 continue
-            self._seen_keys.add(key)
-            if len(self._seen_keys) > 200:
-                self._seen_keys = set(list(self._seen_keys)[-100:])
             sev = Severity.WARN if d.radius_m >= 0.7 or abs(d.y) < 3.0 else Severity.INFO
             if d.details.get('range_m', 99) < 10 and abs(d.y) < 2.5:
                 sev = Severity.CRITICAL
@@ -141,15 +201,15 @@ class RockDetectNode(Node):
                 confidence=d.confidence,
                 source_node='edge_rock_detect',
                 vehicle_id=self.vehicle_id,
-                frame_id=d.frame_id,
-                t_ros=t,
-                t_vehicle=t,
-                x=d.x,
-                y=d.y,
-                z=d.z,
+                frame_id=alert_frame,
+                t_ros=t_ros,
+                t_vehicle=sensor_t,
+                x=alert_x,
+                y=alert_y,
+                z=alert_z,
                 geometry={'kind': 'sphere', 'radius_m': d.radius_m, 'extent_m': list(d.extent_m)},
-                details=d.details,
-                cloud_ref={'topic': SensorBusContract().rocks_cloud_topic, 'stamp': t},
+                details={**d.details, 'pose_valid': pose_fresh},
+                cloud_ref={'topic': self._rocks_cloud_topic, 'stamp': sensor_t},
             )
             a = String()
             a.data = json.dumps(alert.to_dict())
@@ -165,7 +225,9 @@ class RockDetectNode(Node):
                 'node': 'edge_rock_detect',
                 'frames': self._frames,
                 'alerts': self._alerts,
-                'tracks_cached': len(self._seen_keys),
+                'tracks_cached': len(self._dedup),
+                'bad_frames': self._bad_frames,
+                'odom_fresh': time.monotonic() - self._pose_received_at <= self._odom_timeout_s,
             }
         )
         self.pub_status.publish(msg)
@@ -179,8 +241,11 @@ def main(args: Optional[List[str]] = None) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            node.destroy_node()
+        finally:
+            if rclpy.ok():
+                rclpy.shutdown()
 
 
 if __name__ == '__main__':

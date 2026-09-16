@@ -66,6 +66,8 @@ class _BusSource:
                 self._node.destroy_node()
             except Exception:  # noqa: BLE001
                 pass
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
         if self._rclpy is not None and self._rclpy.ok():
             try:
                 self._rclpy.shutdown()

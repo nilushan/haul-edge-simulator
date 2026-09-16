@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
+from edge_perception.cloud_io import decode_xyz
 from edge_sim.topics import SensorBusContract, default_bus_contract
 from edge_viz.tick_buffer import TickBuffer
 
@@ -16,76 +17,65 @@ def _stamp_to_t(stamp: Any) -> float:
     return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
 
-def _cloud_to_lidar_dict(msg: Any, max_points: int = 4000) -> Dict[str, Any]:
-    """Decode PointCloud2 xyz[+intensity][+label][+conf] into viz lidar payload."""
-    # Field offsets
-    offsets = {f.name: f.offset for f in msg.fields}
-    if not {'x', 'y', 'z'}.issubset(offsets):
-        return {
-            't': _stamp_to_t(msg.header.stamp),
-            'n': 0,
-            'xy': [],
-            'z': [],
-            'i': [],
-            'label': [],
-            'conf': [],
-        }
-
+def _decode_optional_float32(msg: Any, name: str, count: int, default: float) -> np.ndarray:
+    field = next((f for f in msg.fields if f.name == name), None)
+    if field is None:
+        return np.full((count,), default, dtype=np.float32)
+    if int(getattr(field, 'datatype', 7)) != 7 or int(getattr(field, 'count', 1)) != 1:
+        return np.full((count,), default, dtype=np.float32)
     step = int(msg.point_step)
-    n = int(msg.width) * int(msg.height)
+    offset = int(field.offset)
+    if step <= 0 or offset < 0 or offset + 4 > step:
+        return np.full((count,), default, dtype=np.float32)
+    width, height = int(msg.width), int(msg.height)
+    row_step = int(getattr(msg, 'row_step', 0)) or width * step
     data = memoryview(msg.data)
-    xs: List[float] = []
-    ys: List[float] = []
-    zs: List[float] = []
-    inten: List[float] = []
-    labels: List[float] = []
-    confs: List[float] = []
-    has_i = 'intensity' in offsets
-    has_label = 'label' in offsets
-    has_conf = 'conf' in offsets
-    ox, oy, oz = offsets['x'], offsets['y'], offsets['z']
-    oi = offsets.get('intensity', 0)
-    ol = offsets.get('label', 0)
-    oc = offsets.get('conf', 0)
+    fmt = '>f' if bool(getattr(msg, 'is_bigendian', False)) else '<f'
+    values = np.full((count,), default, dtype=np.float32)
+    index = 0
+    for row in range(max(height, 0)):
+        for col in range(max(width, 0)):
+            if index >= count:
+                return values
+            base = row * row_step + col * step
+            if base + step > len(data):
+                return values
+            values[index] = struct.unpack_from(fmt, data, base + offset)[0]
+            index += 1
+    return values
 
-    # stride sample if huge
-    stride = max(1, n // max_points) if n > max_points else 1
-    for i in range(0, n, stride):
-        base = i * step
-        if base + 12 > len(data):
-            break
-        x = struct.unpack_from('<f', data, base + ox)[0]
-        y = struct.unpack_from('<f', data, base + oy)[0]
-        z = struct.unpack_from('<f', data, base + oz)[0]
-        if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)):
-            continue
-        xs.append(float(x))
-        ys.append(float(y))
-        zs.append(float(z))
-        if has_i and base + oi + 4 <= len(data):
-            inten.append(float(struct.unpack_from('<f', data, base + oi)[0]))
-        else:
-            inten.append(1.0)
-        if has_label and base + ol + 4 <= len(data):
-            labels.append(float(struct.unpack_from('<f', data, base + ol)[0]))
-        else:
-            labels.append(-1.0)
-        if has_conf and base + oc + 4 <= len(data):
-            confs.append(float(struct.unpack_from('<f', data, base + oc)[0]))
-        else:
-            confs.append(1.0)
-        if len(xs) >= max_points:
-            break
 
-    xy = [[round(xs[i], 3), round(ys[i], 3)] for i in range(len(xs))]
+def _cloud_to_lidar_dict(msg: Any, max_points: int = 4000) -> Dict[str, Any]:
+    """Decode a validated PointCloud2 into the compact browser payload."""
+    if max_points < 1:
+        raise ValueError('max_points must be positive')
+    points, intensity = decode_xyz(msg)
+    count = int(points.shape[0])
+    labels = _decode_optional_float32(msg, 'label', count, -1.0)
+    confidence = _decode_optional_float32(msg, 'conf', count, 1.0)
+    if intensity is None:
+        intensity = np.ones((count,), dtype=np.float32)
+
+    finite = np.all(np.isfinite(points), axis=1)
+    points = points[finite]
+    intensity = intensity[finite]
+    labels = labels[finite]
+    confidence = confidence[finite]
+    if points.shape[0] > max_points:
+        indices = np.linspace(0, points.shape[0] - 1, max_points).astype(int)
+        points = points[indices]
+        intensity = intensity[indices]
+        labels = labels[indices]
+        confidence = confidence[indices]
+
     return {
         't': _stamp_to_t(msg.header.stamp),
-        'n': len(xs),
-        'xy': xy,
-        'z': [round(z, 3) for z in zs],
-        'i': [round(v, 3) for v in inten],
-        'label': [round(v, 3) for v in labels],
-        'conf': [round(v, 3) for v in confs],
+        'n': int(points.shape[0]),
+        'xy': np.round(points[:, :2], 3).tolist(),
+        'z': np.round(points[:, 2], 3).tolist(),
+        'i': np.round(intensity.astype(float), 3).tolist(),
+        'label': np.round(labels.astype(float), 3).tolist(),
+        'conf': np.round(confidence.astype(float), 3).tolist(),
     }
 
 
@@ -236,25 +226,28 @@ class RosBusIngress:
             data = self._json.loads(msg.data)
         except Exception:  # noqa: BLE001
             return
-        self.buffer.push_detections(data)
+        if isinstance(data, dict):
+            self.buffer.push_detections(data)
 
     def _on_alert(self, msg: Any) -> None:
         try:
             data = self._json.loads(msg.data)
         except Exception:  # noqa: BLE001
             return
-        self.buffer.push_alert(data)
+        if isinstance(data, dict):
+            self.buffer.push_alert(data)
 
     def _on_vibe_features(self, msg: Any) -> None:
         try:
             data = self._json.loads(msg.data)
         except Exception:  # noqa: BLE001
             return
-        self.buffer.push_vibe_features(data)
+        if isinstance(data, dict):
+            self.buffer.push_vibe_features(data)
 
     def _on_status(self, msg: Any) -> None:
         try:
             data = self._json.loads(msg.data)
         except Exception:  # noqa: BLE001
             data = {'raw': getattr(msg, 'data', '')}
-        self.buffer.push_edge_status(data)
+        self.buffer.push_edge_status(data if isinstance(data, dict) else {'raw': str(data)})

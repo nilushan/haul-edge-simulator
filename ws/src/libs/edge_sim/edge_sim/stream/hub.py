@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections import deque
@@ -57,6 +58,29 @@ class StreamConfig:
     lidar_max_points: int = 20000
     speed_mps: Optional[float] = None  # None → use map default
     record_dir: Optional[str] = None  # if set in live mode, record first cycle
+
+    def __post_init__(self) -> None:
+        self.mode = (self.mode or 'live').lower()
+        if self.mode not in {'live', 'replay'}:
+            raise ValueError("mode must be 'live' or 'replay'")
+        numeric = {
+            'duration_s': self.duration_s,
+            'imu_hz': self.imu_hz,
+            'gnss_hz': self.gnss_hz,
+            'lidar_hz': self.lidar_hz,
+            'vehicle_hz': self.vehicle_hz,
+            'history_s': self.history_s,
+        }
+        for name, value in numeric.items():
+            if not math.isfinite(float(value)) or float(value) <= 0:
+                raise ValueError(f'{name} must be a positive finite value')
+        if isinstance(self.lidar_max_points, bool) or int(self.lidar_max_points) < 1:
+            raise ValueError('lidar_max_points must be a positive integer')
+        self.lidar_max_points = int(self.lidar_max_points)
+        if self.speed_mps is not None and (
+            not math.isfinite(float(self.speed_mps)) or float(self.speed_mps) <= 0
+        ):
+            raise ValueError('speed_mps must be a positive finite value when set')
 
 
 class StreamHub:
@@ -185,9 +209,6 @@ class StreamHub:
         # cursor indices into each series
         self._ri = {'odom': 0, 'imu': 0, 'gnss': 0, 'lidar': 0}
         self._reader = reader
-        if reader.manifest.duration_s > 0:
-            # keep configured duration but never shorter than stream
-            self.cfg.duration_s = max(self.cfg.duration_s, float(reader.duration_s))
 
     # ----- pub/sub ---------------------------------------------------------
 
@@ -215,50 +236,80 @@ class StreamHub:
     # ----- lifecycle -------------------------------------------------------
 
     def start(self) -> None:
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._running = True
-        self._t = 0.0
-        self._cycle = 0
-        if self.cfg.mode == 'live' and self._vehicle is not None:
-            self._vehicle.reset(0.0)
-        self._thread = threading.Thread(target=self._loop, name='stream-hub', daemon=True)
-        self._thread.start()
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._running = True
+            self._t = 0.0
+            self._cycle = 0
+            self._clear_buffers_unlocked()
+            if self.cfg.mode == 'live':
+                if self._vehicle is None:
+                    raise RuntimeError('live stream source is not initialized')
+                self._vehicle.reset(0.0)
+            else:
+                self._activate_reader(self._stream_index)
+            self._thread = threading.Thread(target=self._loop, name='stream-hub', daemon=True)
+            thread = self._thread
+        thread.start()
+
+    def _close_writer(self) -> None:
+        writer = self._writer
+        if writer is not None:
+            self._writer = None
+            writer.close()
+            self._record_done = True
 
     def stop(self) -> None:
         self._stop.set()
         self._running = False
-        if self._thread:
-            self._thread.join(timeout=2.0)
-        if self._writer is not None:
-            self._writer.close()
-            self._writer = None
-            self._record_done = True
+        thread = self._thread
+        if thread is threading.current_thread():
+            # The worker's finally block owns writer cleanup. Joining the
+            # current thread would raise and previously leaked the writer.
+            return
+        if thread is not None:
+            thread.join(timeout=2.0)
+            if thread.is_alive():
+                raise RuntimeError('StreamHub worker did not stop within 2 seconds')
+        self._thread = None
+        self._close_writer()
+
+    def _pause_for_source_switch(self) -> bool:
+        thread = self._thread
+        if thread is threading.current_thread():
+            raise RuntimeError('source switching is not allowed from a StreamHub callback')
+        was_running = bool(thread and thread.is_alive())
+        if was_running:
+            self.stop()
+        return was_running
 
     def set_map(self, map_id: str) -> None:
-        """Switch live map (clears history). Only valid in live mode."""
-        if self.cfg.mode != 'live':
-            raise RuntimeError('set_map only supported in live mode')
+        """Switch to a live map safely, preserving the prior running state."""
         spec = get_map(map_id)
+        was_running = self._pause_for_source_switch()
         with self._lock:
+            self.cfg.mode = 'live'
             self._maps = [spec]
+            if self.cfg.record_dir:
+                self._record_done = False
             self.cfg.cycle_maps = False
             self._clear_buffers_unlocked()
             self._load_live_map(0)
             self._t = 0.0
             self._cycle = 0
             self._segment_epoch += 1
+        if was_running:
+            self.start()
 
     def set_stream(self, stream_id_or_path: str) -> None:
-        """Switch replay stream (clears history)."""
+        """Switch to a replay stream safely, preserving the running state."""
         root = Path(self.cfg.streams_root) if self.cfg.streams_root else default_streams_root()
         catalog = {s['id']: s for s in discover_streams(root)}
-        if stream_id_or_path in catalog:
-            path = catalog[stream_id_or_path]['path']
-        else:
-            path = stream_id_or_path
+        path = catalog[stream_id_or_path]['path'] if stream_id_or_path in catalog else stream_id_or_path
         reader = StreamReader(path)
+        was_running = self._pause_for_source_switch()
         with self._lock:
             self.cfg.mode = 'replay'
             self._readers = [reader]
@@ -268,6 +319,8 @@ class StreamHub:
             self._t = 0.0
             self._cycle = 0
             self._segment_epoch += 1
+        if was_running:
+            self.start()
 
     def _clear_buffers_unlocked(self) -> None:
         self.imu_buf.clear()
@@ -278,75 +331,90 @@ class StreamHub:
     # ----- main loop -------------------------------------------------------
 
     def _loop(self) -> None:
-        if self.cfg.mode == 'replay':
-            self._loop_replay()
-        else:
-            self._loop_live()
+        try:
+            if self.cfg.mode == 'replay':
+                self._loop_replay()
+            else:
+                self._loop_live()
+        finally:
+            self._running = False
+            self._close_writer()
 
     def _advance_cycle(self) -> None:
-        self._cycle += 1
         with self._lock:
+            self._cycle += 1
             self._clear_buffers_unlocked()
-        if self.cfg.mode == 'live':
-            if self._writer is not None:
-                self._writer.close()
-                self._writer = None
-                self._record_done = True
-            if self.cfg.cycle_maps and len(self._maps) > 1:
-                self._load_live_map(self._map_index + 1)
-            elif self._vehicle is not None:
-                self._vehicle.reset(0.0)
-        else:
-            if self.cfg.cycle_maps and len(self._readers) > 1:
+            if self.cfg.mode == 'live':
+                if self._writer is not None:
+                    self._writer.close()
+                    self._writer = None
+                    self._record_done = True
+                if self.cfg.cycle_maps and len(self._maps) > 1:
+                    self._load_live_map(self._map_index + 1)
+                elif self._vehicle is not None:
+                    self._vehicle.reset(0.0)
+            elif self.cfg.cycle_maps and len(self._readers) > 1:
                 self._activate_reader(self._stream_index + 1)
             else:
                 self._activate_reader(self._stream_index)
 
     def _loop_live(self) -> None:
         cfg = self.cfg
-        next_imu = 0.0
-        next_gnss = 0.0
-        next_lidar = 0.0
-        next_odom = 0.0
-        dt_odom = 1.0 / max(cfg.vehicle_hz, 1.0)
+        periods = {
+            'odom': 1.0 / cfg.vehicle_hz,
+            'imu': 1.0 / cfg.imu_hz,
+            'gnss': 1.0 / cfg.gnss_hz,
+            'lidar': 1.0 / cfg.lidar_hz,
+        }
+        next_sample = {kind: 0.0 for kind in periods}
+        loop_period = 1.0 / max(cfg.vehicle_hz, cfg.imu_hz, cfg.gnss_hz, cfg.lidar_hz)
         t0_wall = time.perf_counter()
-        seg_t0 = 0.0  # wall offset for current map segment
+        seg_t0 = 0.0
         epoch = self._segment_epoch
 
+        def sample_due(kind: str, now: float) -> bool:
+            if now + 1e-9 < next_sample[kind]:
+                return False
+            # Advance from the ideal schedule, not from a late wall time.
+            while next_sample[kind] <= now + 1e-9:
+                next_sample[kind] += periods[kind]
+            return True
+
         while not self._stop.is_set():
+            wake_deadline = time.perf_counter() + loop_period
             if self._segment_epoch != epoch:
-                # Manual map switch — restart segment clock + sample schedule
                 epoch = self._segment_epoch
                 seg_t0 = time.perf_counter() - t0_wall
-                next_imu = next_gnss = next_lidar = next_odom = 0.0
+                next_sample = {kind: 0.0 for kind in periods}
 
             wall = time.perf_counter() - t0_wall
             seg_wall = wall - seg_t0
-
-            if cfg.loop and seg_wall >= cfg.duration_s:
+            if seg_wall >= cfg.duration_s:
+                if not cfg.loop:
+                    break
                 seg_t0 = wall
-                next_imu = next_gnss = next_lidar = next_odom = 0.0
+                next_sample = {kind: 0.0 for kind in periods}
                 self._advance_cycle()
                 continue
-            if not cfg.loop and seg_wall >= cfg.duration_s:
-                self._running = False
-                break
+
+            with self._lock:
+                vehicle, imu, gnss, lidar = self._vehicle, self._imu, self._gnss, self._lidar
+            if vehicle is None or imu is None or gnss is None or lidar is None:
+                self._stop.set()
+                return
 
             self._t = float(seg_wall)
-            assert self._vehicle and self._imu and self._gnss and self._lidar
-            st = self._vehicle.step(self._t)
+            st = vehicle.step(self._t)
 
-            if self._t + 1e-9 >= next_odom:
-                next_odom = self._t + dt_odom
+            if sample_due('odom', self._t):
                 odom = self._odom_dict(st)
                 with self._lock:
                     self.odom_buf.append(odom)
                 if self._writer:
                     self._writer.write('odom', odom)
 
-            if self._t + 1e-9 >= next_imu:
-                next_imu = self._t + 1.0 / max(cfg.imu_hz, 1.0)
-                s = self._imu.sample(st)
+            if sample_due('imu', self._t):
+                s = imu.sample(st)
                 sample = {
                     't': s.t,
                     'gx': s.gx, 'gy': s.gy, 'gz': s.gz,
@@ -357,14 +425,15 @@ class StreamHub:
                 if self._writer:
                     self._writer.write('imu', sample)
 
-            if self._t + 1e-9 >= next_gnss:
-                next_gnss = self._t + 1.0 / max(cfg.gnss_hz, 1.0)
-                g = self._gnss.sample(st)
+            if sample_due('gnss', self._t):
+                g = gnss.sample(st)
                 sample = {
                     't': g.t,
                     'lat': g.latitude_deg,
                     'lon': g.longitude_deg,
                     'alt': g.altitude_m,
+                    'h_acc_m': g.h_acc_m,
+                    'v_acc_m': g.v_acc_m,
                     'fix_ok': g.fix_ok,
                     'status': g.status,
                     'x': st.x,
@@ -375,16 +444,15 @@ class StreamHub:
                 if self._writer:
                     self._writer.write('gnss', sample)
 
-            if self._t + 1e-9 >= next_lidar:
-                next_lidar = self._t + 1.0 / max(cfg.lidar_hz, 1.0)
-                payload = self._lidar_payload(self._lidar.sample(self._vehicle, st))
+            if sample_due('lidar', self._t):
+                payload = self._lidar_payload(lidar.sample(vehicle, st))
                 with self._lock:
                     self._last_lidar = payload
                 if self._writer:
                     self._writer.write('lidar', payload)
 
             self._emit(self.live_tick())
-            time.sleep(dt_odom)
+            self._stop.wait(max(0.0, wake_deadline - time.perf_counter()))
 
     def _loop_replay(self) -> None:
         cfg = self.cfg
@@ -404,18 +472,22 @@ class StreamHub:
             if duration <= 0.0:
                 duration = float(cfg.duration_s)
 
-            if cfg.loop and seg_wall >= duration:
+            if seg_wall >= duration:
+                # Drain and expose the exact terminal samples before ending or
+                # clearing buffers for the next cycle.
+                self._t = duration
+                self._feed_replay_upto(duration)
+                self._emit(self.live_tick())
+                if not cfg.loop:
+                    break
                 seg_t0 = wall
                 self._advance_cycle()
                 continue
-            if not cfg.loop and seg_wall >= duration:
-                self._running = False
-                break
 
             self._t = float(seg_wall)
             self._feed_replay_upto(self._t)
             self._emit(self.live_tick())
-            time.sleep(dt)
+            self._stop.wait(dt)
 
     def _feed_replay_upto(self, t: float) -> None:
         r = self._reader
@@ -465,9 +537,12 @@ class StreamHub:
         }
 
     def _lidar_payload(self, fr: Any) -> Dict[str, Any]:
+        return self._lidar_payload_for(fr, self.cfg.lidar_max_points)
+
+    @staticmethod
+    def _lidar_payload_for(fr: Any, max_n: int) -> Dict[str, Any]:
         pts = fr.points
         inten = fr.intensity
-        max_n = self.cfg.lidar_max_points
         if pts.shape[0] > max_n:
             idx = np.linspace(0, pts.shape[0] - 1, max_n).astype(int)
             pts = pts[idx]
@@ -488,21 +563,37 @@ class StreamHub:
             gnss = list(self.gnss_buf)
             odom = list(self.odom_buf)
             lidar = self._last_lidar
-        return {
-            'running': self._running and not self._stop.is_set(),
-            't': self._t,
-            'cycle': self._cycle,
-            'duration_s': self.cfg.duration_s,
-            'loop': self.cfg.loop,
-            'mode': self.cfg.mode,
-            'map_id': self._active_map_id,
-            'stream_id': self._active_stream_id,
-            'source': self._source_label,
-            'rates': {
+            t = self._t
+            cycle = self._cycle
+            map_id = self._active_map_id
+            stream_id = self._active_stream_id
+            source = self._source_label
+            reader = getattr(self, '_reader', None) if self.cfg.mode == 'replay' else None
+        duration_s = float(reader.duration_s) if reader is not None else self.cfg.duration_s
+        rates = (
+            {
+                'imu_hz': reader.manifest.imu_hz,
+                'gnss_hz': reader.manifest.gnss_hz,
+                'lidar_hz': reader.manifest.lidar_hz,
+            }
+            if reader is not None
+            else {
                 'imu_hz': self.cfg.imu_hz,
                 'gnss_hz': self.cfg.gnss_hz,
                 'lidar_hz': self.cfg.lidar_hz,
-            },
+            }
+        )
+        return {
+            'running': self._running and not self._stop.is_set(),
+            't': t,
+            'cycle': cycle,
+            'duration_s': duration_s,
+            'loop': self.cfg.loop,
+            'mode': self.cfg.mode,
+            'map_id': map_id,
+            'stream_id': stream_id,
+            'source': source,
+            'rates': rates,
             'latest': {
                 'imu': imu[-1] if imu else None,
                 'gnss': gnss[-1] if gnss else None,
@@ -528,15 +619,20 @@ class StreamHub:
             imu_tail = list(self.imu_buf)[-200:]
             odom_tail = list(self.odom_buf)[-300:]
             gnss_tail = list(self.gnss_buf)[-60:]
+            t = self._t
+            cycle = self._cycle
+            map_id = self._active_map_id
+            stream_id = self._active_stream_id
+            source = self._source_label
         return {
             'type': 'tick',
-            't': self._t,
-            'cycle': self._cycle,
+            't': t,
+            'cycle': cycle,
             'running': self._running and not self._stop.is_set(),
             'mode': self.cfg.mode,
-            'map_id': self._active_map_id,
-            'stream_id': self._active_stream_id,
-            'source': self._source_label,
+            'map_id': map_id,
+            'stream_id': stream_id,
+            'source': source,
             'imu': imu,
             'gnss': gnss,
             'odom': odom,
@@ -576,7 +672,7 @@ def record_map_stream(
     duration_s: float = 60.0,
     imu_hz: float = 50.0,
     gnss_hz: float = 5.0,
-    lidar_hz: float = 5.0,
+    lidar_hz: float = 10.0,
     vehicle_hz: float = 50.0,
     lidar_max_points: int = 20000,
     speed_mps: Optional[float] = None,
@@ -605,28 +701,43 @@ def record_map_stream(
     lidar = LidarSimulator(world=world, seed=spec.seed + 17)
     vehicle.reset(0.0)
 
-    next_imu = 0.0
-    next_gnss = 0.0
-    next_lidar = 0.0
-    next_odom = 0.0
-    dt = 1.0 / max(vehicle_hz, 1.0)
+    numeric = {
+        'duration_s': duration_s,
+        'imu_hz': imu_hz,
+        'gnss_hz': gnss_hz,
+        'lidar_hz': lidar_hz,
+        'vehicle_hz': vehicle_hz,
+    }
+    for name, value in numeric.items():
+        if not math.isfinite(float(value)) or float(value) <= 0:
+            raise ValueError(f'{name} must be a positive finite value')
+    if isinstance(lidar_max_points, bool) or int(lidar_max_points) < 1:
+        raise ValueError('lidar_max_points must be a positive integer')
+
+    periods = {
+        'odom': 1.0 / vehicle_hz,
+        'imu': 1.0 / imu_hz,
+        'gnss': 1.0 / gnss_hz,
+        'lidar': 1.0 / lidar_hz,
+    }
+    next_sample = {kind: 0.0 for kind in periods}
 
     with StreamWriter(out, man) as writer:
-        t = 0.0
-        while t <= duration_s + 1e-9:
-            st = vehicle.step(t)
-            if t + 1e-9 >= next_odom:
-                next_odom = t + dt
+        while True:
+            t = min(next_sample.values())
+            if t > duration_s + 1e-9:
+                break
+            st = vehicle.step(float(t))
+            due = [kind for kind, sample_t in next_sample.items() if sample_t <= t + 1e-9]
+            if 'odom' in due:
                 writer.write('odom', StreamHub._odom_dict(st))
-            if t + 1e-9 >= next_imu:
-                next_imu = t + 1.0 / max(imu_hz, 1.0)
+            if 'imu' in due:
                 s = imu.sample(st)
                 writer.write(
                     'imu',
                     {'t': s.t, 'gx': s.gx, 'gy': s.gy, 'gz': s.gz, 'ax': s.ax, 'ay': s.ay, 'az': s.az},
                 )
-            if t + 1e-9 >= next_gnss:
-                next_gnss = t + 1.0 / max(gnss_hz, 1.0)
+            if 'gnss' in due:
                 g = gnss.sample(st)
                 writer.write(
                     'gnss',
@@ -635,30 +746,17 @@ def record_map_stream(
                         'lat': g.latitude_deg,
                         'lon': g.longitude_deg,
                         'alt': g.altitude_m,
+                        'h_acc_m': g.h_acc_m,
+                        'v_acc_m': g.v_acc_m,
                         'fix_ok': g.fix_ok,
                         'status': g.status,
                         'x': st.x,
                         'y': st.y,
                     },
                 )
-            if t + 1e-9 >= next_lidar:
-                next_lidar = t + 1.0 / max(lidar_hz, 1.0)
-                fr = lidar.sample(vehicle, st)
-                pts = fr.points
-                inten = fr.intensity
-                if pts.shape[0] > lidar_max_points:
-                    idx = np.linspace(0, pts.shape[0] - 1, lidar_max_points).astype(int)
-                    pts = pts[idx]
-                    inten = inten[idx]
-                writer.write(
-                    'lidar',
-                    {
-                        't': fr.t,
-                        'n': int(pts.shape[0]),
-                        'xy': np.round(pts[:, :2], 3).tolist(),
-                        'z': np.round(pts[:, 2], 3).tolist(),
-                        'i': np.round(inten.astype(float), 3).tolist(),
-                    },
-                )
-            t += dt
+            if 'lidar' in due:
+                frame = lidar.sample(vehicle, st)
+                writer.write('lidar', StreamHub._lidar_payload_for(frame, int(lidar_max_points)))
+            for kind in due:
+                next_sample[kind] += periods[kind]
     return out

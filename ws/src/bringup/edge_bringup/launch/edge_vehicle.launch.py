@@ -32,6 +32,7 @@ def generate_launch_description():
     use_vibe = LaunchConfiguration('use_vibe_detect')
     use_store = LaunchConfiguration('use_event_store')
     use_viz = LaunchConfiguration('use_viz')
+    viz_host = LaunchConfiguration('viz_host')
     viz_port = LaunchConfiguration('viz_port')
 
     return LaunchDescription([
@@ -42,6 +43,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_vibe_detect', default_value='true'),
         DeclareLaunchArgument('use_event_store', default_value='true'),
         DeclareLaunchArgument('use_viz', default_value='true'),
+        DeclareLaunchArgument('viz_host', default_value='0.0.0.0'),
         DeclareLaunchArgument('viz_port', default_value='8099'),
 
         Node(
@@ -97,7 +99,7 @@ def generate_launch_description():
             executable='viz_from_bus',
             name='edge_viz_bus',
             output='screen',
-            arguments=['--host', '0.0.0.0', '--port', viz_port],
+            arguments=['--host', viz_host, '--port', viz_port],
             condition=IfCondition(use_viz),
         ),
     ])

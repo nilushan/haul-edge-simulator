@@ -24,7 +24,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument('--out-root', type=str, default='', help='default: <repo>/data/streams')
     p.add_argument('--imu-hz', type=float, default=50.0)
     p.add_argument('--gnss-hz', type=float, default=5.0)
-    p.add_argument('--lidar-hz', type=float, default=5.0)
+    p.add_argument('--lidar-hz', type=float, default=10.0)
     p.add_argument('--vehicle-hz', type=float, default=50.0)
     p.add_argument('--list', action='store_true', help='list maps + existing streams and exit')
     args = p.parse_args(argv)

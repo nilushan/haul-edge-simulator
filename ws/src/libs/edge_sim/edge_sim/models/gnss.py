@@ -37,6 +37,12 @@ class GnssSimulator:
         dropout_prob: float = 0.01,
         seed: int = 13,
     ) -> None:
+        if not -90.0 < origin_lat_deg < 90.0:
+            raise ValueError('origin_lat_deg must be strictly between -90 and 90')
+        if h_noise_m < 0 or v_noise_m < 0:
+            raise ValueError('GNSS noise values cannot be negative')
+        if not 0.0 <= dropout_prob <= 1.0:
+            raise ValueError('dropout_prob must be between 0 and 1')
         self.lat0 = math.radians(origin_lat_deg)
         self.lon0 = math.radians(origin_lon_deg)
         self.alt0 = float(origin_alt_m)
@@ -46,14 +52,17 @@ class GnssSimulator:
         self._rng = np.random.default_rng(seed)
         # metres per radian
         self._R = 6378137.0
+        self._fallback_fix = (float(origin_lat_deg), float(origin_lon_deg), self.alt0)
+        self._last_fix: tuple[float, float, float] | None = None
 
     def sample(self, st: VehicleState) -> GnssSample:
         if self._rng.random() < self.dropout_prob:
+            lat, lon, alt = self._last_fix or self._fallback_fix
             return GnssSample(
                 t=st.t,
-                latitude_deg=math.degrees(self.lat0),
-                longitude_deg=math.degrees(self.lon0),
-                altitude_m=self.alt0,
+                latitude_deg=lat,
+                longitude_deg=lon,
+                altitude_m=alt,
                 h_acc_m=50.0,
                 v_acc_m=50.0,
                 fix_ok=False,
@@ -68,6 +77,7 @@ class GnssSimulator:
         lat = self.lat0 + d_north / self._R
         lon = self.lon0 + d_east / (self._R * math.cos(self.lat0))
         alt = self.alt0 + d_up
+        self._last_fix = (math.degrees(lat), math.degrees(lon), alt)
 
         return GnssSample(
             t=st.t,

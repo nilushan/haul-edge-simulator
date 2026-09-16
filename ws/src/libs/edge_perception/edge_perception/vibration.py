@@ -29,7 +29,8 @@ class VibeParams:
     peak_crit: float = 6.0
     min_speed_mps: float = 1.0
     hold_s: float = 0.8
-    gravity: float = 9.80665
+    min_samples: int = 10
+    max_gap_s: float = 0.25
 
 
 @dataclass
@@ -53,12 +54,37 @@ class VibrationMonitor:
 
     def __init__(self, params: VibeParams | None = None) -> None:
         self.params = params or VibeParams()
+        p = self.params
+        if p.window_s <= 0 or p.hop_s <= 0 or p.hold_s < 0:
+            raise ValueError('window_s and hop_s must be positive; hold_s cannot be negative')
+        if p.min_samples < 2 or p.max_gap_s <= 0:
+            raise ValueError('min_samples must be at least 2 and max_gap_s must be positive')
         self._buf: Deque[ImuSample] = deque()
         self._last_emit_t = -1e9
         self._above_since: Optional[float] = None
         self._last_alert_t = -1e9
+        self._last_sample_t: Optional[float] = None
+
+    def reset(self) -> None:
+        """Clear samples plus debounce/rate-limit state after a source reset."""
+        self._buf.clear()
+        self._last_emit_t = -1e9
+        self._above_since = None
+        self._last_alert_t = -1e9
+        self._last_sample_t = None
 
     def push(self, sample: ImuSample) -> Optional[VibeFeatures]:
+        values = (sample.t, sample.ax, sample.ay, sample.az)
+        if not all(np.isfinite(value) for value in values):
+            return None
+        if self._last_sample_t is not None and (
+            sample.t < self._last_sample_t
+            or sample.t - self._last_sample_t > self.params.max_gap_s
+        ):
+            # Clock resets, replay loops, and forward data gaps invalidate both
+            # the feature window and timestamp-based alert/debounce state.
+            self.reset()
+        self._last_sample_t = sample.t
         self._buf.append(sample)
         # drop old
         t_cut = sample.t - self.params.window_s * 1.5
@@ -67,7 +93,13 @@ class VibrationMonitor:
 
         if sample.t - self._last_emit_t < self.params.hop_s:
             return None
-        if not self._buf or (self._buf[-1].t - self._buf[0].t) < self.params.window_s * 0.8:
+        window = [s for s in self._buf if s.t >= sample.t - self.params.window_s]
+        if len(window) < self.params.min_samples:
+            return None
+        times = np.asarray([s.t for s in window], dtype=float)
+        if times[-1] - times[0] < self.params.window_s * 0.8:
+            return None
+        if np.max(np.diff(times)) > self.params.max_gap_s:
             return None
 
         self._last_emit_t = sample.t
@@ -106,6 +138,13 @@ class VibrationMonitor:
         pose: Tuple[float, float, float] = (0.0, 0.0, 0.0),
     ) -> Optional[AlertEvent]:
         p = self.params
+        feature_values = (
+            feat.t, feat.rms_az, feat.peak_az, feat.rms_horiz,
+            feat.peak_horiz, feat.crest_az, speed_mps, *pose,
+        )
+        if feat.n < p.min_samples or not all(np.isfinite(value) for value in feature_values):
+            self._above_since = None
+            return None
         if speed_mps < p.min_speed_mps:
             self._above_since = None
             return None
@@ -133,7 +172,16 @@ class VibrationMonitor:
         return AlertEvent(
             type='excessive_vibration',
             severity=sev,
-            confidence=float(np.clip(feat.rms_az / max(p.rms_crit, 1e-3), 0.0, 1.0)),
+            confidence=float(
+                np.clip(
+                    max(
+                        feat.rms_az / max(p.rms_crit, 1e-3),
+                        feat.peak_az / max(p.peak_crit, 1e-3),
+                    ),
+                    0.0,
+                    1.0,
+                )
+            ),
             source_node=source_node,
             vehicle_id=vehicle_id,
             t_vehicle=feat.t,

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import List, Optional
 
 import numpy as np
@@ -18,6 +19,7 @@ from edge_perception.cloud_io import decode_xyz, encode_xyz_label
 from edge_perception.geometry import roi_mask, voxel_downsample
 from edge_perception.schema import AlertEvent, DetectionSet, Label, Severity
 from edge_sim.topics import SensorBusContract
+from edge_bund_detect.alerting import CooldownGate, matching_detection
 
 
 class BundDetectNode(Node):
@@ -34,14 +36,16 @@ class BundDetectNode(Node):
 
         self.vehicle_id = str(self.get_parameter('vehicle_id').value)
         self.cooldown = float(self.get_parameter('alert_cooldown_s').value)
+        self._gate = CooldownGate(self.cooldown)
         self._params = BundParams()
         self._frames = 0
         self._alerts = 0
-        self._last_alert_t = -1e9
+        self._bad_frames = 0
 
         lidar = str(self.get_parameter('lidar_topic').value)
+        self._bunds_cloud_topic = str(self.get_parameter('bunds_cloud_topic').value)
         self.pub_cloud = self.create_publisher(
-            PointCloud2, str(self.get_parameter('bunds_cloud_topic').value), qos_profile_sensor_data
+            PointCloud2, self._bunds_cloud_topic, qos_profile_sensor_data
         )
         self.pub_det = self.create_publisher(String, str(self.get_parameter('detections_topic').value), 10)
         self.pub_alert = self.create_publisher(String, str(self.get_parameter('alerts_topic').value), 10)
@@ -51,6 +55,13 @@ class BundDetectNode(Node):
         self.get_logger().info(f'edge_bund_detect listening on {lidar}')
 
     def _on_lidar(self, msg: PointCloud2) -> None:
+        try:
+            self._process_lidar(msg)
+        except (ValueError, TypeError, IndexError) as exc:
+            self._bad_frames += 1
+            self.get_logger().warn(f'ignoring malformed lidar frame: {exc}')
+
+    def _process_lidar(self, msg: PointCloud2) -> None:
         pts, _ = decode_xyz(msg)
         if pts.size == 0:
             return
@@ -65,10 +76,15 @@ class BundDetectNode(Node):
             labels = np.full((bund_pts.shape[0],), float(Label.BUND), dtype=np.float32)
             self.pub_cloud.publish(encode_xyz_label(bund_pts, msg.header, labels=labels))
 
-        t = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        sensor_t = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
+        ros_now = float(self.get_clock().now().nanoseconds) * 1e-9
+        t_ros = sensor_t if sensor_t > 0.0 else ros_now
+        input_frame = msg.header.frame_id or 'base_link'
+        for detection in dets:
+            detection.frame_id = input_frame
         dset = DetectionSet(
-            t=t,
-            frame_id=msg.header.frame_id or 'base_link',
+            t=sensor_t,
+            frame_id=input_frame,
             source_node='edge_bund_detect',
             detections=dets,
         )
@@ -76,34 +92,42 @@ class BundDetectNode(Node):
         s.data = json.dumps(dset.to_dict())
         self.pub_det.publish(s)
 
-        if alert_specs and (t - self._last_alert_t) >= self.cooldown:
+        if alert_specs and self._gate.allow(time.monotonic()):
             for spec in alert_specs:
-                pose = next((d for d in dets if d.details.get('side') == spec.get('side')), None)
+                pose = matching_detection(dets, spec.get('side'))
+                pose_valid = pose is not None
                 alert = AlertEvent(
                     type=str(spec.get('type', 'bund_gap')),
                     severity=str(spec.get('severity', Severity.WARN)),
-                    confidence=0.75,
+                    confidence=pose.confidence if pose is not None else 0.5,
                     source_node='edge_bund_detect',
                     vehicle_id=self.vehicle_id,
-                    t_ros=t,
-                    t_vehicle=t,
-                    x=pose.x if pose else 0.0,
-                    y=pose.y if pose else 0.0,
-                    z=pose.z if pose else 0.0,
-                    details=spec,
-                    cloud_ref={'topic': SensorBusContract().bunds_cloud_topic, 'stamp': t},
+                    frame_id=pose.frame_id if pose is not None else input_frame,
+                    t_ros=t_ros,
+                    t_vehicle=sensor_t,
+                    x=pose.x if pose is not None else 0.0,
+                    y=pose.y if pose is not None else 0.0,
+                    z=pose.z if pose is not None else 0.0,
+                    details={**spec, 'pose_valid': pose_valid},
+                    cloud_ref={'topic': self._bunds_cloud_topic, 'stamp': sensor_t},
                 )
                 a = String()
                 a.data = json.dumps(alert.to_dict())
                 self.pub_alert.publish(a)
                 self._alerts += 1
-            self._last_alert_t = t
 
         self._frames += 1
 
     def _heartbeat(self) -> None:
         msg = String()
-        msg.data = json.dumps({'node': 'edge_bund_detect', 'frames': self._frames, 'alerts': self._alerts})
+        msg.data = json.dumps(
+            {
+                'node': 'edge_bund_detect',
+                'frames': self._frames,
+                'alerts': self._alerts,
+                'bad_frames': self._bad_frames,
+            }
+        )
         self.pub_status.publish(msg)
 
 
@@ -115,8 +139,11 @@ def main(args: Optional[List[str]] = None) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            node.destroy_node()
+        finally:
+            if rclpy.ok():
+                rclpy.shutdown()
 
 
 if __name__ == '__main__':

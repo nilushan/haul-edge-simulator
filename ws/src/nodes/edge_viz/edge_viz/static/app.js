@@ -922,9 +922,17 @@ function fillWorldLayer(layer, xyzFlat, rgb, visible) {
   return n;
 }
 
-function fillDetectLayer(layer, cloud, rgb, odom, { forwardOnly = false, minX = 0.0 } = {}) {
-  if (!layer.pts.visible || !cloud?.xy?.length || !odom) {
-    // keep previous live layer if detector empty
+function fillDetectLayer(layer, cloud, rgb, odom, { forwardOnly = false, minX = 0.0, keepPreviousIfEmpty = false } = {}) {
+  if (!layer.pts.visible || !odom) {
+    if (!keepPreviousIfEmpty) layer.geo.setDrawRange(0, 0);
+    return 0;
+  }
+  if (!cloud?.xy?.length) {
+    // No current detection. For detector-only layers (rocks/obstacles/ground)
+    // clear the overlay so stale points don't persist across frames — the
+    // world-fixed obstacle voxel map already retains history. For dual-sourced
+    // layers (bunds, also filled from the live scan) keep the prior content.
+    if (!keepPreviousIfEmpty) layer.geo.setDrawRange(0, 0);
     return 0;
   }
   const n = Math.min(cloud.xy.length, layer.maxN);
@@ -947,7 +955,10 @@ function fillDetectLayer(layer, cloud, rgb, odom, { forwardOnly = false, minX = 
     layer.colors[j + 2] = rgb[2] * (0.7 + 0.3 * c);
     w += 1;
   }
-  if (w > 0) {
+  // Always update the draw range for detector-only layers, even when w == 0,
+  // so filtered-out or empty detections clear the overlay instead of leaving
+  // stale points. Dual-sourced layers keep their prior content when empty.
+  if (w > 0 || !keepPreviousIfEmpty) {
     layer.geo.setDrawRange(0, w);
     layer.geo.attributes.position.needsUpdate = true;
     layer.geo.attributes.color.needsUpdate = true;
@@ -966,6 +977,7 @@ function updateDetectClouds(detect, odom) {
   // Live bunds already drawn from scan; detector bunds optional overlay
   const bunds = fillDetectLayer(detectLayers.bunds, clouds.bunds, LAYER_RGB.bunds, odom, {
     minX: 2.0,
+    keepPreviousIfEmpty: true, // bunds are primarily drawn from the live scan
   });
   const obstacles = fillDetectLayer(
     detectLayers.obstacles,

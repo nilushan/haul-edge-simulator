@@ -6,12 +6,17 @@
   <description>Excessive vibration detection from IMU</description>
   <maintainer email="dev@example.com">edge_vibe_detect</maintainer>
   <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>edge_sim</depend>
   <depend>edge_perception</depend>
+
+  <test_depend>python3-pytest</test_depend>
   <export>
     <build_type>ament_python</build_type>
   </export>

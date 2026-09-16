@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -21,9 +23,9 @@ class StreamManifest:
     speed_mps: float = 8.0
     imu_hz: float = 50.0
     gnss_hz: float = 5.0
-    lidar_hz: float = 5.0
+    lidar_hz: float = 10.0
     vehicle_hz: float = 50.0
-    lidar_max_points: int = 4000
+    lidar_max_points: int = 20000
     description: str = ''
     files: Dict[str, str] = field(
         default_factory=lambda: {
@@ -39,9 +41,21 @@ class StreamManifest:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> 'StreamManifest':
+        if not isinstance(d, dict):
+            raise TypeError('stream manifest must be a JSON object')
+        version = d.get('version', STREAM_VERSION)
+        if version != STREAM_VERSION:
+            raise ValueError(f'unsupported stream version {version!r}; expected {STREAM_VERSION}')
+        if 'files' in d and not isinstance(d['files'], dict):
+            raise ValueError('stream manifest files must be an object mapping kinds to paths')
         known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
         payload = {k: v for k, v in d.items() if k in known}
-        return cls(**payload)
+        manifest = cls(**payload)
+        for name in ('duration_s', 'imu_hz', 'gnss_hz', 'lidar_hz', 'vehicle_hz'):
+            value = float(getattr(manifest, name))
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f'manifest {name} must be a positive finite value')
+        return manifest
 
     def save(self, root: Path) -> None:
         root.mkdir(parents=True, exist_ok=True)
@@ -93,7 +107,14 @@ def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
             line = line.strip()
             if not line:
                 continue
-            out.append(json.loads(line))
+            sample = json.loads(line)
+            if not isinstance(sample, dict):
+                raise ValueError(f'stream sample in {path} must be a JSON object')
+            t = float(sample.get('t', 0.0))
+            if not math.isfinite(t):
+                raise ValueError(f'stream sample in {path} has a non-finite timestamp')
+            out.append(sample)
+    out.sort(key=lambda sample: float(sample.get('t', 0.0)))
     return out
 
 
@@ -115,6 +136,8 @@ class StreamReader:
             self.duration_s = max(self.duration_s, float(self.odom[-1].get('t', 0.0)))
         if self.imu:
             self.duration_s = max(self.duration_s, float(self.imu[-1].get('t', 0.0)))
+        if self.gnss:
+            self.duration_s = max(self.duration_s, float(self.gnss[-1].get('t', 0.0)))
         if self.lidar:
             self.duration_s = max(self.duration_s, float(self.lidar[-1].get('t', 0.0)))
 
@@ -170,8 +193,17 @@ def discover_streams(root: Path | str) -> List[Dict[str, Any]]:
 
 def default_streams_root(project_root: Optional[Path] = None) -> Path:
     if project_root is None:
-        # .../ws/src/libs/edge_sim/edge_sim/stream/format.py
-        # parents: stream, pkg, ros_pkg, libs, src, ws, repo
-        here = Path(__file__).resolve()
-        project_root = here.parents[6]
+        configured = os.environ.get('HAUL_EDGE_PROJECT_ROOT')
+        if configured:
+            project_root = Path(configured).expanduser()
+        else:
+            here = Path(__file__).resolve()
+            project_root = next(
+                (
+                    parent
+                    for parent in (here.parent, *here.parents)
+                    if (parent / 'ws' / 'src').is_dir() and (parent / 'data').is_dir()
+                ),
+                Path.cwd(),
+            )
     return project_root / 'data' / 'streams'

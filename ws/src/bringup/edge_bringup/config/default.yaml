@@ -39,6 +39,11 @@ edge_rock_detect:
     vehicle_id: haul-01
     alert_min_conf: 0.55
     publish_ground: true
+    odom_topic: /odom
+    odom_timeout_s: 1.0
+    dedup_cell_m: 2.0
+    dedup_ttl_s: 120.0
+    max_cluster_points: 2000
 
 edge_bund_detect:
   ros__parameters:
@@ -63,8 +68,16 @@ edge_vibe_detect:
     peak_warn: 4.0
     peak_crit: 6.0
     min_speed_mps: 1.0
+    window_s: 1.0
+    hop_s: 0.2
+    hold_s: 0.8
+    min_samples: 10
+    max_gap_s: 0.25
+    odom_timeout_s: 1.0
 
 edge_event_store:
   ros__parameters:
     alerts_topic: /edge/alerts
     status_topic: /edge/status
+    max_rows: 100000
+    max_age_days: 30.0

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections import deque
@@ -63,11 +64,13 @@ class TickBuffer:
     # --- lifecycle (no background generator; ingress pushes samples) ------
 
     def start(self) -> None:
-        self._running = True
-        self._t0_wall = time.time()
+        with self._lock:
+            self._running = True
+            self._t0_wall = time.time()
 
     def stop(self) -> None:
-        self._running = False
+        with self._lock:
+            self._running = False
 
     def set_source_meta(
         self,
@@ -92,7 +95,12 @@ class TickBuffer:
     def _touch_t(self, t: Optional[float] = None) -> float:
         if t is None:
             t = time.time() - self._t0_wall
-        self._t = float(t)
+        try:
+            candidate = float(t)
+        except (TypeError, ValueError):
+            return self._t
+        if math.isfinite(candidate):
+            self._t = candidate
         return self._t
 
     def push_imu(self, sample: Dict[str, Any]) -> None:
@@ -135,8 +143,11 @@ class TickBuffer:
             self._detections = payload
 
     def push_alert(self, alert: Dict[str, Any]) -> None:
+        timestamp = alert.get('t_ros')
+        if timestamp is None:
+            timestamp = alert.get('t_vehicle')
         with self._lock:
-            self._touch_t(alert.get('t_ros') or alert.get('t_vehicle'))
+            self._touch_t(timestamp)
             self._alerts.appendleft(alert)
 
     def push_vibe_features(self, features: Dict[str, Any]) -> None:
@@ -165,16 +176,23 @@ class TickBuffer:
             detect = self._detect_payload_unlocked()
             # Always expose raw scan for viz map/obstacles; processed is additive.
             display_lidar = lidar or processed
+            running = self._running
+            t = self._t
+            cycle = self._cycle
+            mode = self._mode
+            map_id = self._map_id
+            stream_id = self._stream_id
+            source = self._source
         return {
-            'running': self._running,
-            't': self._t,
-            'cycle': self._cycle,
+            'running': running,
+            't': t,
+            'cycle': cycle,
             'duration_s': self.cfg.history_s,
             'loop': True,
-            'mode': self._mode,
-            'map_id': self._map_id,
-            'stream_id': self._stream_id,
-            'source': self._source,
+            'mode': mode,
+            'map_id': map_id,
+            'stream_id': stream_id,
+            'source': source,
             'bus': self.contract.to_dict(),
             'rates': {
                 'imu_hz': self.cfg.imu_hz,
@@ -208,15 +226,29 @@ class TickBuffer:
             gnss_tail = list(self.gnss_buf)[-60:]
             status = self._edge_status
             detect = self._detect_payload_unlocked()
+            # Emit-once: per-frame detection clouds are consumed by this tick.
+            # Clearing them prevents stale body-frame clouds from being
+            # re-projected with advancing odom on later ticks, which made
+            # detections appear to slide with the truck and stamp a trail of
+            # voxels into the world obstacle map until a new detection arrived.
+            for kind in self._detect_clouds:
+                self._detect_clouds[kind] = None
+            t = self._t
+            cycle = self._cycle
+            running = self._running
+            mode = self._mode
+            map_id = self._map_id
+            stream_id = self._stream_id
+            source = self._source
         return {
             'type': 'tick',
-            't': self._t,
-            'cycle': self._cycle,
-            'running': self._running,
-            'mode': self._mode,
-            'map_id': self._map_id,
-            'stream_id': self._stream_id,
-            'source': self._source,
+            't': t,
+            'cycle': cycle,
+            'running': running,
+            'mode': mode,
+            'map_id': map_id,
+            'stream_id': stream_id,
+            'source': source,
             'imu': imu,
             'gnss': gnss,
             'odom': odom,
@@ -229,16 +261,22 @@ class TickBuffer:
         }
 
     def catalog(self) -> Dict[str, Any]:
+        with self._lock:
+            mode = self._mode
+            map_id = self._map_id
+            stream_id = self._stream_id
+            source = self._source
+            cycle = self._cycle
         return {
-            'mode': self._mode,
+            'mode': mode,
             'maps': [],
             'streams': [],
             'bus': self.contract.to_dict(),
             'active': {
-                'map_id': self._map_id,
-                'stream_id': self._stream_id,
-                'source': self._source,
-                'cycle': self._cycle,
+                'map_id': map_id,
+                'stream_id': stream_id,
+                'source': source,
+                'cycle': cycle,
             },
             'playlist': {'maps': [], 'streams': [], 'cycle': False},
         }

@@ -123,20 +123,25 @@ class HaulWorld:
     def height(self, x: np.ndarray | float, y: np.ndarray | float) -> np.ndarray | float:
         """Vectorized surface height z(x, y)."""
         scalar = np.isscalar(x) and np.isscalar(y)
-        x_arr = np.atleast_1d(np.asarray(x, dtype=float)).astype(float)
-        y_arr = np.atleast_1d(np.asarray(y, dtype=float)).astype(float)
+        x_b, y_b = np.broadcast_arrays(np.asarray(x, dtype=float), np.asarray(y, dtype=float))
+        shape = x_b.shape
+        x_arr = np.atleast_1d(x_b).reshape(-1)
+        y_arr = np.atleast_1d(y_b).reshape(-1)
 
-        # Station proxy: invert x ≈ s + A sin(f s) with 1 fixed-point iter
+        # Station proxy: invert x ≈ s + A sin(f s). A few fixed-point
+        # iterations are cheap and remain accurate for more aggressive maps.
         amp = float(self.path.x_wiggle_amp)
         freq = float(self.path.x_wiggle_freq)
-        s = x_arr - amp * np.sin(freq * x_arr)
-        s = x_arr - amp * np.sin(freq * s)
+        s = x_arr.copy()
+        for _ in range(5):
+            s = x_arr - amp * np.sin(freq * s)
         cx, cy, yaw = self.centerline(s)
         nx = -np.sin(yaw)
         ny = np.cos(yaw)
         lat = (x_arr - cx) * nx + (y_arr - cy) * ny
 
-        z = np.asarray(self.grade_z(s), dtype=float).copy()
+        z_grade = np.asarray(self.grade_z(s), dtype=float)
+        z = z_grade.copy()
 
         # road crown
         on_road = np.abs(lat) <= self.road_hw
@@ -150,30 +155,31 @@ class HaulWorld:
         for side in (-1.0, 1.0):
             c = side * (self.road_hw + 0.45 * self.berm_w)
             d = np.abs(lat - c)
-            bund = self.grade_z(s) + self.berm_h * (1.0 - d / self.berm_w)
+            bund = z_grade + self.berm_h * (1.0 - d / self.berm_w)
             z = np.where(d < self.berm_w, np.maximum(z, bund), z)
 
         # off-road roughness
         off = np.abs(lat) > self.road_hw + self.berm_w
         z = np.where(off, z + 0.35 * np.sin(0.03 * x_arr) * np.sin(0.05 * y_arr), z)
 
-        # rocks
+        # Rocks are upper-hemisphere bumps on the local surface. Evaluate all
+        # rocks in one bounded matrix instead of looping over the point cloud
+        # once per rock; this keeps fine LiDAR marching practical.
         if self._rock_xy.size:
-            for i in range(self._rock_xy.shape[0]):
-                rx, ry = self._rock_xy[i]
-                rr = self._rock_r[i]
-                d = np.hypot(x_arr - rx, y_arr - ry)
-                disk = d < rr
-                if np.any(disk):
-                    top = z + np.sqrt(np.maximum(0.0, rr * rr - d * d))
-                    z = np.where(disk, np.maximum(z, top), z)
+            dx = x_arr[:, None] - self._rock_xy[None, :, 0]
+            dy = y_arr[:, None] - self._rock_xy[None, :, 1]
+            radius_sq = self._rock_r[None, :] ** 2
+            bump = np.sqrt(np.maximum(0.0, radius_sq - (dx * dx + dy * dy)))
+            z = z + np.max(bump, axis=1)
 
         if scalar:
             return float(z.reshape(-1)[0])
-        return z.reshape(np.asarray(x).shape)
+        return z.reshape(shape)
 
     def slope_along_heading(self, x: float, y: float, yaw: float, ds: float = 1.0) -> float:
         """dz/ds along heading (approx pitch of road)."""
+        if not np.isfinite(ds) or ds <= 0:
+            raise ValueError('ds must be a positive finite value')
         x2 = x + ds * np.cos(yaw)
         y2 = y + ds * np.sin(yaw)
         return float(self.height(x2, y2) - self.height(x, y)) / ds

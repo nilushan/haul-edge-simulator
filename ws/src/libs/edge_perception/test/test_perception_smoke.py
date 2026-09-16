@@ -28,7 +28,10 @@ def test_ground_and_rocks():
     obs = pts[gr.obstacle_idx]
     hag = gr.hag[gr.obstacle_idx]
     dets = detect_rocks(obs, hag)
-    assert isinstance(dets, list)
+    assert len(dets) == 1
+    assert dets[0].type == 'rock'
+    assert abs(dets[0].x - 12.0) < 1.0
+    assert abs(dets[0].y - 1.0) < 1.0
 
 
 def test_bunds_smoke():

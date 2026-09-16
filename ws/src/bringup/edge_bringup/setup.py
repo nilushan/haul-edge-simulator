@@ -1,6 +1,5 @@
 from setuptools import setup
 from glob import glob
-import os
 
 package_name = 'edge_bringup'
 

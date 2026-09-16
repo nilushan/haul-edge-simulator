@@ -27,46 +27,63 @@ class BundCrest:
     stations_x: np.ndarray
     y: np.ndarray
     z: np.ndarray
-    height_m: np.ndarray
+    height_m: np.ndarray  # NaN where local road-ground support is unavailable
 
 
 def _side_mask(points: np.ndarray, side: str, p: BundParams) -> np.ndarray:
+    if side not in ('left', 'right'):
+        raise ValueError("side must be 'left' or 'right'")
     y = points[:, 1]
     # body: y left positive
-    if side == 'left':
-        center = +p.road_half_width_m
-    else:
-        center = -p.road_half_width_m
+    center = p.road_half_width_m if side == 'left' else -p.road_half_width_m
     return np.abs(y - center) <= p.shoulder_band_m
 
 
 def extract_crest(points: np.ndarray, side: str, params: BundParams | None = None) -> BundCrest | None:
+    """Extract shoulder crest points and heights relative to nearby road ground."""
     p = params or BundParams()
-    if points.size == 0:
-        return None
-    m = _side_mask(points, side, p)
-    pts = points[m]
-    if pts.shape[0] < p.min_points_per_bin:
+    points = np.asarray(points)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError('points must have shape (N, 3)')
+    if p.x_bin_m <= 0 or p.shoulder_band_m < 0 or p.min_points_per_bin < 1:
+        raise ValueError('x_bin_m and min_points_per_bin must be positive; shoulder_band_m cannot be negative')
+    _side_mask(points, side, p)  # validate even for an empty cloud
+    points = points[np.all(np.isfinite(points), axis=1)]
+    if points.shape[0] == 0:
         return None
 
-    x = pts[:, 0]
-    x0 = float(np.floor(x.min() / p.x_bin_m) * p.x_bin_m)
-    bins = np.floor((x - x0) / p.x_bin_m).astype(np.int64)
+    shoulder = points[_side_mask(points, side, p)]
+    if shoulder.shape[0] < p.min_points_per_bin:
+        return None
+
+    x0 = float(np.floor(shoulder[:, 0].min() / p.x_bin_m) * p.x_bin_m)
+    bins = np.floor((shoulder[:, 0] - x0) / p.x_bin_m).astype(np.int64)
     xs, ys, zs, hs = [], [], [], []
     for b in np.unique(bins):
-        sel = bins == b
-        if int(sel.sum()) < p.min_points_per_bin:
+        selected = bins == b
+        if int(selected.sum()) < p.min_points_per_bin:
             continue
-        chunk = pts[sel]
-        # crest ≈ highest z in bin
-        k = int(np.argmax(chunk[:, 2]))
-        top = chunk[k]
-        # height proxy vs local low
-        h = float(top[2] - np.percentile(chunk[:, 2], 10.0))
+        chunk = shoulder[selected]
+        top = chunk[int(np.argmax(chunk[:, 2]))]
+
+        bin_lo = x0 + float(b) * p.x_bin_m
+        bin_hi = bin_lo + p.x_bin_m
+        road = points[
+            (points[:, 0] >= bin_lo)
+            & (points[:, 0] < bin_hi)
+            & (np.abs(points[:, 1]) <= p.road_half_width_m * 0.75)
+        ]
+        if road.shape[0] >= p.min_points_per_bin:
+            ground_z = float(np.percentile(road[:, 2], 20.0))
+            height = max(0.0, float(top[2]) - ground_z)
+        else:
+            height = float('nan')
+
         xs.append(float(top[0]))
         ys.append(float(top[1]))
         zs.append(float(top[2]))
-        hs.append(h)
+        hs.append(height)
+
     if not xs:
         return None
     return BundCrest(
@@ -79,73 +96,89 @@ def extract_crest(points: np.ndarray, side: str, params: BundParams | None = Non
 
 
 def detect_bunds(points: np.ndarray, params: BundParams | None = None) -> Tuple[List[Detection], List[dict]]:
-    """
-    Returns (detections for viz, alert detail dicts for gaps/low sections).
-    """
+    """Return crest detections and supported gap/low-section alert details."""
     p = params or BundParams()
+    points = np.asarray(points)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError('points must have shape (N, 3)')
+    finite_points = points[np.all(np.isfinite(points), axis=1)]
     detections: List[Detection] = []
     alerts: List[dict] = []
 
     for side in ('left', 'right'):
-        crest = extract_crest(points, side, p)
+        side_points = finite_points[_side_mask(finite_points, side, p)]
+        # Absence is evidence only when this specific shoulder was observed
+        # over enough longitudinal distance; data from the opposite side does
+        # not prove a physical gap here.
+        side_coverage = (
+            side_points.shape[0] >= 2 * p.min_points_per_bin
+            and float(np.ptp(side_points[:, 0])) >= p.gap_length_m
+        ) if side_points.shape[0] else False
+        crest = extract_crest(finite_points, side, p)
         if crest is None:
-            alerts.append(
-                {
-                    'type': 'bund_gap',
-                    'side': side,
-                    'reason': 'no_crest',
-                    'severity': 'warn',
-                }
-            )
+            if side_coverage:
+                alerts.append(
+                    {
+                        'type': 'bund_gap',
+                        'side': side,
+                        'reason': 'no_crest',
+                        'severity': 'warn',
+                    }
+                )
             continue
 
-        # one detection summarizing crest polyline
+        known_heights = crest.height_m[np.isfinite(crest.height_m)]
+        height_extent = (
+            float(np.max(known_heights))
+            if known_heights.size
+            else float(np.ptp(crest.z))
+        )
+        details = {
+            'side': side,
+            'mean_height_m': float(np.mean(known_heights)) if known_heights.size else None,
+            'min_height_m': float(np.min(known_heights)) if known_heights.size else None,
+            'height_bins': int(known_heights.size),
+            'stations': int(crest.stations_x.size),
+        }
         detections.append(
             Detection(
                 type='bund',
-                confidence=0.8,
+                confidence=0.8 if known_heights.size else 0.55,
                 frame_id='base_link',
                 x=float(np.mean(crest.stations_x)),
                 y=float(np.mean(crest.y)),
                 z=float(np.mean(crest.z)),
                 radius_m=0.0,
                 extent_m=(
-                    float(crest.stations_x.max() - crest.stations_x.min()),
-                    float(p.shoulder_band_m),
-                    float(np.mean(crest.height_m)),
+                    float(np.ptp(crest.stations_x)),
+                    float(2.0 * p.shoulder_band_m),
+                    height_extent,
                 ),
                 label=int(Label.BUND),
                 point_count=int(crest.stations_x.size),
-                details={
-                    'side': side,
-                    'mean_height_m': float(np.mean(crest.height_m)),
-                    'min_height_m': float(np.min(crest.height_m)),
-                    'stations': int(crest.stations_x.size),
-                },
+                details=details,
             )
         )
 
-        # low segments
-        low = crest.height_m < p.min_height_m
-        if np.any(low):
-            alerts.append(
-                {
-                    'type': 'bund_low',
-                    'side': side,
-                    'severity': 'warn',
-                    'min_height_m': float(np.min(crest.height_m)),
-                    'nom_height_m': p.nom_height_m,
-                    'low_bins': int(np.count_nonzero(low)),
-                }
-            )
+        # Only issue height alerts where a local road-ground reference exists.
+        if known_heights.size:
+            low = known_heights < p.min_height_m
+            if np.any(low):
+                alerts.append(
+                    {
+                        'type': 'bund_low',
+                        'side': side,
+                        'severity': 'warn',
+                        'min_height_m': float(np.min(known_heights)),
+                        'nom_height_m': p.nom_height_m,
+                        'low_bins': int(np.count_nonzero(low)),
+                    }
+                )
 
-        # gap: large missing x span vs expected continuous bins
         if crest.stations_x.size >= 2:
-            order = np.argsort(crest.stations_x)
-            xs = crest.stations_x[order]
+            xs = np.sort(crest.stations_x)
             gaps = np.diff(xs)
-            big = gaps >= p.gap_length_m
-            if np.any(big):
+            if np.any(gaps >= p.gap_length_m):
                 alerts.append(
                     {
                         'type': 'bund_gap',
@@ -163,9 +196,13 @@ def bund_points_from_detections(
     points: np.ndarray,
     params: BundParams | None = None,
 ) -> np.ndarray:
-    """Return points that fall in left/right shoulder bands (for cloud publish)."""
+    """Return finite points in left/right shoulder bands for cloud publishing."""
     p = params or BundParams()
-    if points.size == 0:
+    points = np.asarray(points)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError('points must have shape (N, 3)')
+    if points.shape[0] == 0:
         return points
-    m = _side_mask(points, 'left', p) | _side_mask(points, 'right', p)
-    return points[m]
+    points = points[np.all(np.isfinite(points), axis=1)]
+    mask = _side_mask(points, 'left', p) | _side_mask(points, 'right', p)
+    return points[mask]
