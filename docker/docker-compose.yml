@@ -1,12 +1,4 @@
-# Haul edge sensor sim
-#
-#   ./start.sh              # build + viz UI on :8099
-#   ./start.sh --ros        # also publish ROS 2 topics
-#   ./start.sh --shell      # interactive container
-#
-# Project name is set by ./start.sh (COMPOSE_PROJECT_NAME=haul-edge-sim)
-# so this does not collide with other projects's docker/ compose project.
-
+# Haul edge multi-package stack
 name: haul-edge-sim
 
 services:
@@ -21,7 +13,7 @@ services:
     ports:
       - "${VIZ_PORT:-8099}:8099"
     environment:
-      PYTHONPATH: /project/ws/src/edge_sensor_sim
+      PYTHONPATH: /project/ws/src/edge_sim:/project/ws/src/edge_sensor_source:/project/ws/src/edge_processor:/project/ws/src/edge_viz:/project/ws/src/edge_bringup
       DURATION: ${DURATION:-60}
       VIZ_HOST: "0.0.0.0"
       VIZ_PORT: "8099"

@@ -1,0 +1,13 @@
+/**:
+  ros__parameters:
+    imu_topic: /imu/data
+    gnss_topic: /gnss/fix
+    lidar_topic: /lidar
+    odom_topic: /odom
+    sim_odom_topic: /sim/ground_truth/odom
+    processed_lidar_topic: /edge/lidar/processed
+    edge_status_topic: /edge/status
+    frame_map: map
+    frame_base: base_link
+    frame_imu: imu_link
+    frame_lidar: lidar_link

@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>edge_sensor_source</name>
+  <version>0.3.0</version>
+  <description>ROS 2 node: publish simulated (or replayed) sensors onto the edge bus topics.</description>
+  <maintainer email="dev@example.com">edge_sensor_source</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>edge_sim</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

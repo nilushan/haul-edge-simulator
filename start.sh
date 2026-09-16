@@ -2,10 +2,10 @@
 # All-in-one: build Docker image and run haul-edge-sim stack.
 #
 # Usage:
-#   ./start.sh              # dev: StreamHub → viz (no ROS bus)
-#   ./start.sh --edge       # realistic: source → bus → processor → viz_bus
-#   ./start.sh --ros        # StreamHub → ROS publishers only
-#   ./start.sh --all        # StreamHub → ROS + direct viz (dev shortcut)
+#   ./start.sh              # dev: edge_sim StreamHub → edge_viz
+#   ./start.sh --edge       # edge_sensor_source + edge_processor + edge_viz(bus)
+#   ./start.sh --ros        # edge_sensor_source only
+#   ./start.sh --all        # hub viz + in-process ROS source (dev shortcut)
 #   ./start.sh --replay     # replay data/streams playlist (dev path)
 #   ./start.sh --shell      # interactive Jazzy shell
 #   ./start.sh --build-only # build image and exit

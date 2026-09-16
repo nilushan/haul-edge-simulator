@@ -1,68 +1,67 @@
 # Code structure
 
-```text
-haul-edge-sim/
-├── start.sh                 # Docker entry (dev / edge / ros)
-├── scripts/                 # Host helpers
-├── docker/                  # Image + compose
-├── data/streams/            # Replayable recorded streams
-├── docs/                    # Architecture notes
-└── ws/src/edge_sensor_sim/  # ROS 2 Python package
-    ├── config/              # ROS params (bus topic names, rates)
-    ├── launch/              # edge_vehicle, sensor_suite
-    ├── test/
-    └── edge_sensor_sim/     # Python library
-        ├── domain/          # pure business/sim core (no ROS/HTTP)
-        │   ├── maps.py      # map presets
-        │   └── models/      # world, vehicle, imu, gnss, lidar
-        ├── stream/          # sole stream generator (live + replay)
-        │   ├── hub.py
-        │   └── format.py    # JSONL record/replay
-        ├── bus/             # edge topic contract + tick buffer
-        │   ├── contract.py
-        │   └── tick_buffer.py
-        ├── adapters/        # technology edges
-        │   ├── ros/         # publish/subscribe ROS bus
-        │   ├── web/         # browser UI (static + servers)
-        │   └── files/       # offline / stream CLIs
-        └── apps/            # process composition (stream_server)
-```
-
-## Dependency direction
+Readable layout: **sim / separate ROS nodes / viz / bringup**.
 
 ```text
-adapters  ──uses──►  stream / bus  ──uses──►  domain
-apps      ──wires──►  adapters + stream
+ws/src/
+├── edge_sim/                 # library only (no ROS nodes)
+│   └── edge_sim/
+│       ├── maps.py
+│       ├── models/           # world, vehicle, imu, gnss, lidar
+│       ├── stream/           # StreamHub + JSONL format
+│       ├── topics.py         # shared topic name contract
+│       └── tools/            # generate_stream / generate_offline
+│
+├── edge_sensor_source/       # ROS node package
+│   └── sensor_source_node    # StreamHub → /imu /gnss /lidar /odom
+│
+├── edge_processor/           # ROS node package
+│   └── processor_node        # /lidar → /edge/lidar/processed
+│
+├── edge_viz/                 # web UI package
+│   └── edge_viz/
+│       ├── app.py            # HTTP + WebSocket server
+│       ├── run_from_hub.py   # DEV: read StreamHub
+│       ├── run_from_bus.py   # EDGE: subscribe ROS topics
+│       ├── bus_ingress.py    # ROS subscriptions for viz
+│       ├── tick_buffer.py
+│       └── static/           # browser UI
+│
+└── edge_bringup/             # launch + config only
+    ├── launch/edge_vehicle.launch.py
+    └── config/
 ```
 
-- **domain** never imports ROS, aiohttp, or adapters
-- **stream** only uses domain (generates sensor samples)
-- **bus** is transport-agnostic contract + in-memory buffer
-- **adapters.ros** turns hub samples into ROS topics, or ROS topics into ticks
-- **adapters.web** only *reads* a tick source (hub or bus buffer)
-- **apps** starts processes
+## Why separate ROS packages?
 
-## What lives where
+Each node is its own package so you can:
 
-| Want to change… | Look in |
-|---|---|
-| Map geometry / rocks | `domain/maps.py`, `domain/models/world.py` |
-| IMU/GNSS/LiDAR math | `domain/models/` |
-| Live rates, replay, multi-map cycle | `stream/hub.py` |
-| Topic names (`/lidar`, …) | `bus/contract.py`, `config/` |
-| ROS publisher node | `adapters/ros/sensor_source_node.py` |
-| Example processor | `adapters/ros/processor_stub_node.py` |
-| Browser UI | `adapters/web/static/` |
-| Dev viz (hub → WS) | `adapters/web/hub_server.py` |
-| Edge viz (bus → WS) | `adapters/web/bus_server.py` |
-| `./start.sh` process wiring | `apps/stream_server.py`, `docker/entrypoint.sh` |
+- run / replace one node without touching others  
+- swap `edge_sensor_source` for real drivers or bag play  
+- grow processors (`edge_ground_seg`, `edge_detect`, …) as new packages  
 
-## Entrypoints
+## Data flow
+
+```text
+DEV
+  edge_sim.StreamHub ──► edge_viz.run_from_hub ──► browser
+
+EDGE
+  edge_sensor_source ──publish──► ROS topics
+  edge_processor     ──subscribe/publish──► /edge/*
+  edge_viz.run_from_bus ──subscribe──► browser
+```
+
+## Commands
 
 ```bash
-python3 -m edge_sensor_sim.apps.stream_server
-python3 -m edge_sensor_sim.adapters.web.hub_server
-python3 -m edge_sensor_sim.adapters.web.bus_server
-python3 -m edge_sensor_sim.adapters.files.generate_stream
-python3 -m edge_sensor_sim.adapters.files.generate_offline
+# Dev UI (no ROS)
+./scripts/run_viz.sh
+python3 -m edge_viz.run_from_hub
+
+# Edge stack
+ros2 launch edge_bringup edge_vehicle.launch.py
+
+# Source only
+ros2 launch edge_bringup sensor_source.launch.py
 ```
