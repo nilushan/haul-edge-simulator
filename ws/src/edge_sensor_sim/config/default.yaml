@@ -1,0 +1,12 @@
+sensor_suite:
+  ros__parameters:
+    imu_hz: 100.0
+    gnss_hz: 5.0
+    lidar_hz: 10.0
+    odom_hz: 50.0
+    speed_mps: 8.0
+    frame_base: base_link
+    frame_imu: imu_link
+    frame_lidar: lidar_link
+    frame_map: map
+    publish_tf: true

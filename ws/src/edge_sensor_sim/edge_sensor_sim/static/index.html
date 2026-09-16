@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Haul edge sensor suite</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>Haul edge sensor suite</h1>
+      <p class="sub">Synthetic IMU · GNSS · LiDAR · path — REST + WebSocket</p>
+    </div>
+    <div class="badges">
+      <span id="conn" class="badge bad">WS offline</span>
+      <span id="clock" class="badge">t = 0.0 s</span>
+      <span id="cycle" class="badge">cycle 0</span>
+    </div>
+  </header>
+
+  <section class="stats" id="stats">
+    <div class="stat"><label>Speed</label><div id="s_speed">—</div></div>
+    <div class="stat"><label>IMU az</label><div id="s_az">—</div></div>
+    <div class="stat"><label>Yaw rate</label><div id="s_gz">—</div></div>
+    <div class="stat"><label>GNSS</label><div id="s_gnss">—</div></div>
+    <div class="stat"><label>LiDAR pts</label><div id="s_lidar">—</div></div>
+    <div class="stat"><label>Pose ENU</label><div id="s_pose">—</div></div>
+  </section>
+
+  <main class="grid">
+    <article class="card wide">
+      <h2>IMU acceleration (body)</h2>
+      <canvas id="chartAccel" height="120"></canvas>
+    </article>
+    <article class="card wide">
+      <h2>IMU gyro (body)</h2>
+      <canvas id="chartGyro" height="120"></canvas>
+    </article>
+    <article class="card">
+      <h2>Vehicle path (ENU)</h2>
+      <canvas id="pathCanvas" width="480" height="360"></canvas>
+      <p class="hint">Top-down · x east, y north · trail ≈ 1 min</p>
+    </article>
+    <article class="card">
+      <h2>LiDAR BEV (body)</h2>
+      <canvas id="lidarCanvas" width="480" height="360"></canvas>
+      <p class="hint">x forward, y left · colour by height</p>
+    </article>
+    <article class="card wide">
+      <h2>GNSS altitude / fix</h2>
+      <canvas id="chartGnss" height="100"></canvas>
+    </article>
+  </main>
+
+  <footer class="foot">
+    <span>REST <code>/api/status</code> · <code>/api/lidar</code> · <code>/api/history/{imu|gnss|odom}</code></span>
+    <span>WS <code>/ws</code></span>
+  </footer>
+</body>
+</html>

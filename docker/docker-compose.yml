@@ -1,0 +1,30 @@
+# Haul edge sensor sim
+#
+#   ./start.sh              # build + viz UI on :8099
+#   ./start.sh --ros        # also publish ROS 2 topics
+#   ./start.sh --shell      # interactive container
+#
+# Project name is set by ./start.sh (COMPOSE_PROJECT_NAME=haul-edge-sim)
+# so this does not collide with other projects's docker/ compose project.
+
+name: haul-edge-sim
+
+services:
+  sim:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: haul-edge-sim:jazzy
+    volumes:
+      - ../:/project
+    working_dir: /project
+    ports:
+      - "${VIZ_PORT:-8099}:8099"
+    environment:
+      PYTHONPATH: /project/ws/src/edge_sensor_sim
+      DURATION: ${DURATION:-60}
+      VIZ_HOST: "0.0.0.0"
+      VIZ_PORT: "8099"
+      MODE: ${MODE:-viz}
+    stdin_open: true
+    tty: true

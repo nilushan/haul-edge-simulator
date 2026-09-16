@@ -1,0 +1,12 @@
+data/**
+!data/README.md
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+ws/build/
+ws/install/
+ws/log/
+*.bag
+*.mcap
