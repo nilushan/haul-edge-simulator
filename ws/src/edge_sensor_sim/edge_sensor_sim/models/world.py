@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List
+from dataclasses import dataclass, field
+from typing import List, Sequence, Tuple
 
 import numpy as np
 
@@ -13,6 +13,29 @@ class Rock:
     x: float
     y: float
     r: float
+
+
+@dataclass(frozen=True)
+class PathProfile:
+    """Parametric corridor shape (used by map presets)."""
+
+    y_terms: Tuple[Tuple[float, float, float], ...] = (
+        (55.0, 0.0065, 0.0),
+        (22.0, 0.0028, 0.7),
+        (8.0, 0.014, 1.2),
+    )
+    x_wiggle_amp: float = 12.0
+    x_wiggle_freq: float = 0.004
+    grades: Tuple[Tuple[float, float, float], ...] = (
+        (60.0, 9.0, 140.0),
+        (260.0, -6.5, 70.0),
+        (380.0, 4.0, 90.0),
+        (520.0, -2.5, 50.0),
+    )
+    undulation: Tuple[Tuple[float, float, float], ...] = (
+        (1.4, 0.018, 0.0),
+        (0.7, 0.04, 0.8),
+    )
 
 
 class HaulWorld:
@@ -31,19 +54,24 @@ class HaulWorld:
         berm_height_m: float = 1.65,
         berm_width_m: float = 2.0,
         seed: int = 19,
+        n_rocks: int = 48,
+        rock_radius: Tuple[float, float] = (0.3, 1.15),
+        path: PathProfile | None = None,
     ) -> None:
         self.road_hw = float(road_half_width_m)
         self.berm_h = float(berm_height_m)
         self.berm_w = float(berm_width_m)
+        self.path = path or PathProfile()
         self._rng = np.random.default_rng(seed)
 
         self.rocks: List[Rock] = []
-        for i in range(48):
+        r0, r1 = float(rock_radius[0]), float(rock_radius[1])
+        for i in range(int(n_rocks)):
             s = 30.0 + i * 22.0 + float(self._rng.uniform(-6, 6))
             cx, cy, yaw = self.centerline(s)
             side = float(self._rng.choice([-1.0, 1.0]))
             if self._rng.random() < 0.45:
-                lat = side * float(self._rng.uniform(0.8, self.road_hw - 0.6))
+                lat = side * float(self._rng.uniform(0.8, max(0.9, self.road_hw - 0.6)))
             else:
                 lat = side * float(self._rng.uniform(self.road_hw - 0.3, self.road_hw + 1.5))
             nx, ny = -np.sin(yaw), np.cos(yaw)
@@ -51,28 +79,25 @@ class HaulWorld:
                 Rock(
                     x=float(cx + nx * lat),
                     y=float(cy + ny * lat),
-                    r=float(self._rng.uniform(0.3, 1.15)),
+                    r=float(self._rng.uniform(r0, r1)),
                 )
             )
-        self._rock_xy = np.array([[r.x, r.y] for r in self.rocks], dtype=np.float64)
-        self._rock_r = np.array([r.r for r in self.rocks], dtype=np.float64)
+        self._rock_xy = np.array([[r.x, r.y] for r in self.rocks], dtype=np.float64) if self.rocks else np.zeros((0, 2))
+        self._rock_r = np.array([r.r for r in self.rocks], dtype=np.float64) if self.rocks else np.zeros((0,))
+
+    def _xy_at(self, s_arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        y = np.zeros_like(s_arr, dtype=float)
+        for amp, freq, phase in self.path.y_terms:
+            y = y + float(amp) * np.sin(float(freq) * s_arr + float(phase))
+        x = s_arr + float(self.path.x_wiggle_amp) * np.sin(float(self.path.x_wiggle_freq) * s_arr)
+        return x, y
 
     def centerline(self, s: float | np.ndarray) -> tuple:
         """Centerline pose vs route station s [m] → (x, y, yaw)."""
         s_arr = np.asarray(s, dtype=float)
-        y = (
-            55.0 * np.sin(0.0065 * s_arr)
-            + 22.0 * np.sin(0.0028 * s_arr + 0.7)
-            + 8.0 * np.sin(0.014 * s_arr + 1.2)
-        )
-        x = s_arr + 12.0 * np.sin(0.004 * s_arr)
+        x, y = self._xy_at(s_arr)
         ds = 0.75
-        y2 = (
-            55.0 * np.sin(0.0065 * (s_arr + ds))
-            + 22.0 * np.sin(0.0028 * (s_arr + ds) + 0.7)
-            + 8.0 * np.sin(0.014 * (s_arr + ds) + 1.2)
-        )
-        x2 = (s_arr + ds) + 12.0 * np.sin(0.004 * (s_arr + ds))
+        x2, y2 = self._xy_at(s_arr + ds)
         yaw = np.arctan2(y2 - y, x2 - x)
         if np.isscalar(s):
             return float(x), float(y), float(yaw)
@@ -81,12 +106,11 @@ class HaulWorld:
     def grade_z(self, s: float | np.ndarray) -> np.ndarray | float:
         s_arr = np.asarray(s, dtype=float)
         z = np.zeros_like(s_arr, dtype=float)
-        z = z + 9.0 * self._smoothstep((s_arr - 60.0) / 140.0)  # climb
-        z = z - 6.5 * self._smoothstep((s_arr - 260.0) / 70.0)  # drop
-        z = z + 4.0 * self._smoothstep((s_arr - 380.0) / 90.0)  # climb out
-        z = z - 2.5 * self._smoothstep((s_arr - 520.0) / 50.0)  # short drop
-        z = z + 1.4 * np.sin(0.018 * s_arr)
-        z = z + 0.7 * np.sin(0.04 * s_arr + 0.8)
+        for start, rise, length in self.path.grades:
+            length = max(float(length), 1e-3)
+            z = z + float(rise) * self._smoothstep((s_arr - float(start)) / length)
+        for amp, freq, phase in self.path.undulation:
+            z = z + float(amp) * np.sin(float(freq) * s_arr + float(phase))
         if np.isscalar(s):
             return float(z)
         return z
@@ -102,9 +126,11 @@ class HaulWorld:
         x_arr = np.atleast_1d(np.asarray(x, dtype=float)).astype(float)
         y_arr = np.atleast_1d(np.asarray(y, dtype=float)).astype(float)
 
-        # Station proxy: invert x ≈ s + 12 sin(0.004 s) with 1 fixed-point iter
-        s = x_arr.copy()
-        s = x_arr - 12.0 * np.sin(0.004 * s)
+        # Station proxy: invert x ≈ s + A sin(f s) with 1 fixed-point iter
+        amp = float(self.path.x_wiggle_amp)
+        freq = float(self.path.x_wiggle_freq)
+        s = x_arr - amp * np.sin(freq * x_arr)
+        s = x_arr - amp * np.sin(freq * s)
         cx, cy, yaw = self.centerline(s)
         nx = -np.sin(yaw)
         ny = np.cos(yaw)
@@ -140,7 +166,6 @@ class HaulWorld:
                 disk = d < rr
                 if np.any(disk):
                     top = z + np.sqrt(np.maximum(0.0, rr * rr - d * d))
-                    # sit on grade under rock center
                     z = np.where(disk, np.maximum(z, top), z)
 
         if scalar:

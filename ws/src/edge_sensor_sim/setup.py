@@ -25,8 +25,12 @@ setup(
     entry_points={
         'console_scripts': [
             'sensor_suite_node = edge_sensor_sim.sensor_suite_node:main',
+            'processor_stub_node = edge_sensor_sim.processor_stub_node:main',
             'generate_offline = edge_sensor_sim.generate_offline:main',
+            'generate_stream = edge_sensor_sim.generate_stream:main',
             'viz_server = edge_sensor_sim.viz_server:main',
+            'viz_bus_server = edge_sensor_sim.viz_bus_server:main',
+            'stream_server = edge_sensor_sim.stream_server:main',
         ],
     },
 )

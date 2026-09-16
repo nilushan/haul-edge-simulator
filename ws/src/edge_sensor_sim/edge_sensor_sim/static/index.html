@@ -23,9 +23,14 @@
     <header class="overlay top">
       <div>
         <h1>Haul truck edge suite</h1>
-        <p class="sub">Scene = live odom path + LiDAR returns only (no decorative terrain)</p>
+        <p class="sub">Visualizer subscribes to sole StreamHub · multi-map replayable sensor stream</p>
       </div>
       <div class="badges">
+        <label class="badge select">
+          map
+          <select id="mapSelect" title="Switch live map"></select>
+        </label>
+        <span id="source" class="badge">source —</span>
         <span id="conn" class="badge bad">WS offline</span>
         <span id="clock" class="badge">t = 0.00 s</span>
         <span id="cycle" class="badge">cycle 0</span>

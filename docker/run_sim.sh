@@ -4,15 +4,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-haul-edge-sim}"
 docker compose -f docker/docker-compose.yml build sim
-docker compose -f docker/docker-compose.yml run --rm sim bash -lc '
-  set -eo pipefail
-  set +u
-  source /opt/ros/jazzy/setup.bash
-  set -u
-  cd /project/ws
-  colcon build --packages-select edge_sensor_sim
-  set +u
-  source install/setup.bash
-  set -u
-  ros2 launch edge_sensor_sim sensor_suite.launch.py
-'
+docker compose -f docker/docker-compose.yml run --rm \
+  -e MODE=ros \
+  -e STREAM_MODE="${STREAM_MODE:-live}" \
+  -e MAPS="${MAPS:-haul_corridor,tight_switchbacks,open_pit_bench,rocky_descent}" \
+  -e DURATION="${DURATION:-60}" \
+  sim bash /project/docker/entrypoint.sh

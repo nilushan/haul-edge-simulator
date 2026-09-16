@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""ROS 2 node: sample pure-Python sensor models and publish standard messages."""
+"""ROS 2 node: subscribe to StreamHub (sole generator) and publish standard messages."""
 
 from __future__ import annotations
 
+import os
 import struct
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import rclpy
-from builtin_interfaces.msg import Time
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
@@ -17,21 +17,10 @@ from sensor_msgs.msg import Imu, NavSatFix, NavSatStatus, PointCloud2, PointFiel
 from std_msgs.msg import Header
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 
-from edge_sensor_sim.models import (
-    GnssSimulator,
-    HaulWorld,
-    ImuSimulator,
-    LidarSimulator,
-    VehicleSimulator,
-)
-
-
-def _stamp(node: Node, t_sec: float) -> Time:
-    # Use simulation time offset from node start wall clock for simplicity
-    msg = Time()
-    msg.sec = int(t_sec)
-    msg.nanosec = int((t_sec - int(t_sec)) * 1e9)
-    return msg
+from edge_sensor_sim.bus.contract import SensorBusContract
+from edge_sensor_sim.maps import DEFAULT_PLAYLIST
+from edge_sensor_sim.stream.format import default_streams_root
+from edge_sensor_sim.stream.hub import StreamConfig, StreamHub
 
 
 def points_to_cloud(
@@ -70,8 +59,33 @@ def points_to_cloud(
     return msg
 
 
+def _lidar_arrays(lidar: Dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    xy = np.asarray(lidar.get('xy') or [], dtype=np.float32)
+    z = np.asarray(lidar.get('z') or [], dtype=np.float32)
+    inten = np.asarray(lidar.get('i') or [], dtype=np.float32)
+    if xy.size == 0:
+        return np.zeros((0, 3), dtype=np.float32), np.zeros((0,), dtype=np.float32)
+    if xy.ndim == 1:
+        xy = xy.reshape(-1, 2)
+    n = xy.shape[0]
+    pts = np.zeros((n, 3), dtype=np.float32)
+    pts[:, :2] = xy[:n]
+    if z.size:
+        pts[:, 2] = z[:n]
+    if inten.size < n:
+        inten = np.resize(inten, n)
+    return pts, inten.astype(np.float32)
+
+
 class SensorSuiteNode(Node):
-    def __init__(self) -> None:
+    """
+    ROS bridge over StreamHub.
+
+    The hub is the sole sensor generator (live multi-map or replay).
+    This node only subscribes to hub state and republishes ROS messages.
+    """
+
+    def __init__(self, hub: Optional[StreamHub] = None) -> None:
         super().__init__('sensor_suite')
 
         self.declare_parameter('imu_hz', 100.0)
@@ -79,10 +93,22 @@ class SensorSuiteNode(Node):
         self.declare_parameter('lidar_hz', 10.0)
         self.declare_parameter('odom_hz', 50.0)
         self.declare_parameter('speed_mps', 8.0)
-        self.declare_parameter('frame_base', 'base_link')
-        self.declare_parameter('frame_imu', 'imu_link')
-        self.declare_parameter('frame_lidar', 'lidar_link')
-        self.declare_parameter('frame_map', 'map')
+        self.declare_parameter('duration_s', float(os.environ.get('DURATION', '60')))
+        self.declare_parameter('stream_mode', os.environ.get('STREAM_MODE', 'live'))
+        self.declare_parameter('maps', os.environ.get('MAPS', ','.join(DEFAULT_PLAYLIST)))
+        self.declare_parameter('stream_path', os.environ.get('STREAM_PATH', ''))
+        self.declare_parameter('streams_root', os.environ.get('STREAMS_ROOT', ''))
+        self.declare_parameter('cycle_maps', True)
+        bus = SensorBusContract()
+        self.declare_parameter('imu_topic', bus.imu_topic)
+        self.declare_parameter('gnss_topic', bus.gnss_topic)
+        self.declare_parameter('lidar_topic', bus.lidar_topic)
+        self.declare_parameter('odom_topic', bus.odom_topic)
+        self.declare_parameter('sim_odom_topic', bus.sim_odom_topic)
+        self.declare_parameter('frame_base', bus.frame_base)
+        self.declare_parameter('frame_imu', bus.frame_imu)
+        self.declare_parameter('frame_lidar', bus.frame_lidar)
+        self.declare_parameter('frame_map', bus.frame_map)
         self.declare_parameter('publish_tf', True)
 
         imu_hz = float(self.get_parameter('imu_hz').value)
@@ -90,6 +116,13 @@ class SensorSuiteNode(Node):
         lidar_hz = float(self.get_parameter('lidar_hz').value)
         odom_hz = float(self.get_parameter('odom_hz').value)
         speed = float(self.get_parameter('speed_mps').value)
+        duration_s = float(self.get_parameter('duration_s').value)
+        mode = str(self.get_parameter('stream_mode').value or 'live')
+        maps_raw = str(self.get_parameter('maps').value or '')
+        map_ids = [m.strip() for m in maps_raw.split(',') if m.strip()] or list(DEFAULT_PLAYLIST)
+        stream_path = str(self.get_parameter('stream_path').value or '') or None
+        streams_root = str(self.get_parameter('streams_root').value or '') or str(default_streams_root())
+        cycle_maps = bool(self.get_parameter('cycle_maps').value)
 
         self.frame_base = str(self.get_parameter('frame_base').value)
         self.frame_imu = str(self.get_parameter('frame_imu').value)
@@ -97,16 +130,44 @@ class SensorSuiteNode(Node):
         self.frame_map = str(self.get_parameter('frame_map').value)
         self.publish_tf = bool(self.get_parameter('publish_tf').value)
 
-        world = HaulWorld(seed=19)
-        self.vehicle = VehicleSimulator(speed_mps=speed, world=world)
-        self.imu_model = ImuSimulator()
-        self.gnss_model = GnssSimulator()
-        self.lidar_model = LidarSimulator(world=world)
+        if hub is None:
+            if stream_path:
+                mode = 'replay'
+            cfg = StreamConfig(
+                mode=mode,
+                map_ids=map_ids,
+                stream_path=stream_path,
+                streams_root=streams_root,
+                duration_s=duration_s,
+                loop=True,
+                cycle_maps=cycle_maps,
+                imu_hz=min(imu_hz, 50.0),  # hub internal rates; ROS pub rates separate
+                gnss_hz=gnss_hz,
+                lidar_hz=min(lidar_hz, 10.0),
+                vehicle_hz=odom_hz,
+                history_s=duration_s,
+                speed_mps=speed,
+            )
+            self.hub = StreamHub(cfg)
+            self._owns_hub = True
+        else:
+            self.hub = hub
+            self._owns_hub = False
 
-        self.pub_imu = self.create_publisher(Imu, '/imu/data', qos_profile_sensor_data)
-        self.pub_gnss = self.create_publisher(NavSatFix, '/gnss/fix', qos_profile_sensor_data)
-        self.pub_lidar = self.create_publisher(PointCloud2, '/lidar', qos_profile_sensor_data)
-        self.pub_odom = self.create_publisher(Odometry, '/sim/ground_truth/odom', 10)
+        imu_topic = str(self.get_parameter('imu_topic').value)
+        gnss_topic = str(self.get_parameter('gnss_topic').value)
+        lidar_topic = str(self.get_parameter('lidar_topic').value)
+        odom_topic = str(self.get_parameter('odom_topic').value)
+        sim_odom_topic = str(self.get_parameter('sim_odom_topic').value)
+
+        # Publish onto the canonical sensor bus (same topics real drivers should use).
+        self.pub_imu = self.create_publisher(Imu, imu_topic, qos_profile_sensor_data)
+        self.pub_gnss = self.create_publisher(NavSatFix, gnss_topic, qos_profile_sensor_data)
+        self.pub_lidar = self.create_publisher(PointCloud2, lidar_topic, qos_profile_sensor_data)
+        self.pub_odom = self.create_publisher(Odometry, odom_topic, 10)
+        self.pub_sim_odom = None
+        if sim_odom_topic and sim_odom_topic != odom_topic:
+            self.pub_sim_odom = self.create_publisher(Odometry, sim_odom_topic, 10)
 
         self._tf_broadcaster: Optional[TransformBroadcaster] = None
         self._static_tf: Optional[StaticTransformBroadcaster] = None
@@ -115,40 +176,38 @@ class SensorSuiteNode(Node):
             self._static_tf = StaticTransformBroadcaster(self)
             self._publish_static_tf()
 
-        self._t0 = self.get_clock().now()
-        self.vehicle.reset(0.0)
-        self._last_st = self.vehicle.step(0.0)
+        self._last_imu_t = -1.0
+        self._last_gnss_t = -1.0
+        self._last_lidar_t = -1.0
+        self._last_odom_t = -1.0
 
-        self.create_timer(1.0 / imu_hz, self._on_imu)
-        self.create_timer(1.0 / gnss_hz, self._on_gnss)
-        self.create_timer(1.0 / lidar_hz, self._on_lidar)
-        self.create_timer(1.0 / odom_hz, self._on_odom)
+        if self._owns_hub:
+            self.hub.start()
 
+        # Poll hub at the highest publish rate; emit only on new sample timestamps.
+        poll_hz = max(imu_hz, odom_hz, lidar_hz, gnss_hz, 20.0)
+        self.create_timer(1.0 / poll_hz, self._on_poll)
+
+        cat = self.hub.catalog()
         self.get_logger().info(
-            f'sensor_suite started  imu={imu_hz}Hz gnss={gnss_hz}Hz lidar={lidar_hz}Hz speed={speed}m/s'
+            f'sensor_suite subscribed to StreamHub mode={self.hub.cfg.mode} '
+            f'source={self.hub.snapshot().get("source")} maps={[m["id"] for m in cat["maps"]]}'
         )
 
-    def _sim_time(self) -> float:
-        dt = self.get_clock().now() - self._t0
-        return dt.nanoseconds * 1e-9
+    def destroy_node(self) -> bool:
+        if self._owns_hub:
+            self.hub.stop()
+        return super().destroy_node()
 
-    def _header(self, frame_id: str, t: float) -> Header:
+    def _header(self, frame_id: str) -> Header:
         h = Header()
-        h.stamp = _stamp(self, t)
-        # Prefer ROS clock stamp for tooling that ignores custom sec
         h.stamp = self.get_clock().now().to_msg()
         h.frame_id = frame_id
         return h
 
-    def _advance(self):
-        t = self._sim_time()
-        self._last_st = self.vehicle.step(t)
-        return self._last_st
-
     def _publish_static_tf(self) -> None:
         assert self._static_tf is not None
         statics = []
-        # imu at origin of base
         for child, z in ((self.frame_imu, 0.0), (self.frame_lidar, 2.5)):
             tf = TransformStamped()
             tf.header.stamp = self.get_clock().now().to_msg()
@@ -161,77 +220,95 @@ class SensorSuiteNode(Node):
             statics.append(tf)
         self._static_tf.sendTransform(statics)
 
-    def _on_imu(self) -> None:
-        st = self._advance()
-        s = self.imu_model.sample(st)
+    def _on_poll(self) -> None:
+        snap = self.hub.snapshot()
+        imu = snap['latest'].get('imu')
+        gnss = snap['latest'].get('gnss')
+        odom = snap['latest'].get('odom')
+        lidar = snap.get('lidar')
+
+        if imu and float(imu.get('t', -1.0)) > self._last_imu_t:
+            self._last_imu_t = float(imu['t'])
+            self._publish_imu(imu)
+
+        if gnss and float(gnss.get('t', -1.0)) > self._last_gnss_t:
+            self._last_gnss_t = float(gnss['t'])
+            self._publish_gnss(gnss)
+
+        if odom and float(odom.get('t', -1.0)) > self._last_odom_t:
+            self._last_odom_t = float(odom['t'])
+            self._publish_odom(odom)
+
+        if lidar and float(lidar.get('t', -1.0)) > self._last_lidar_t:
+            self._last_lidar_t = float(lidar['t'])
+            self._publish_lidar(lidar)
+
+    def _publish_imu(self, s: Dict[str, Any]) -> None:
         msg = Imu()
-        msg.header = self._header(self.frame_imu, s.t)
-        msg.angular_velocity.x = s.gx
-        msg.angular_velocity.y = s.gy
-        msg.angular_velocity.z = s.gz
-        msg.linear_acceleration.x = s.ax
-        msg.linear_acceleration.y = s.ay
-        msg.linear_acceleration.z = s.az
-        # orientation unknown (no mag fusion) — leave identity + high cov
+        msg.header = self._header(self.frame_imu)
+        msg.angular_velocity.x = float(s['gx'])
+        msg.angular_velocity.y = float(s['gy'])
+        msg.angular_velocity.z = float(s['gz'])
+        msg.linear_acceleration.x = float(s['ax'])
+        msg.linear_acceleration.y = float(s['ay'])
+        msg.linear_acceleration.z = float(s['az'])
         msg.orientation.w = 1.0
         msg.orientation_covariance[0] = -1.0
         self.pub_imu.publish(msg)
 
-    def _on_gnss(self) -> None:
-        st = self._advance()
-        s = self.gnss_model.sample(st)
+    def _publish_gnss(self, s: Dict[str, Any]) -> None:
         msg = NavSatFix()
-        msg.header = self._header(self.frame_map, s.t)
-        msg.latitude = s.latitude_deg
-        msg.longitude = s.longitude_deg
-        msg.altitude = s.altitude_m
+        msg.header = self._header(self.frame_map)
+        msg.latitude = float(s['lat'])
+        msg.longitude = float(s['lon'])
+        msg.altitude = float(s['alt'])
         msg.position_covariance_type = NavSatFix.COVARIANCE_TYPE_APPROXIMATED
-        msg.position_covariance[0] = s.h_acc_m ** 2
-        msg.position_covariance[4] = s.h_acc_m ** 2
-        msg.position_covariance[8] = s.v_acc_m ** 2
+        msg.position_covariance[0] = 2.25
+        msg.position_covariance[4] = 2.25
+        msg.position_covariance[8] = 9.0
+        fix_ok = bool(s.get('fix_ok', True))
         msg.status.status = (
-            NavSatStatus.STATUS_SBAS_FIX if s.fix_ok else NavSatStatus.STATUS_NO_FIX
+            NavSatStatus.STATUS_SBAS_FIX if fix_ok else NavSatStatus.STATUS_NO_FIX
         )
         msg.status.service = NavSatStatus.SERVICE_GPS
         self.pub_gnss.publish(msg)
 
-    def _on_lidar(self) -> None:
-        st = self._advance()
-        fr = self.lidar_model.sample(self.vehicle, st)
-        header = self._header(self.frame_lidar, fr.t)
-        cloud = points_to_cloud(fr.points, fr.intensity, header)
+    def _publish_lidar(self, fr: Dict[str, Any]) -> None:
+        pts, inten = _lidar_arrays(fr)
+        header = self._header(self.frame_lidar)
+        cloud = points_to_cloud(pts, inten, header)
         self.pub_lidar.publish(cloud)
 
-    def _on_odom(self) -> None:
-        st = self._advance()
+    def _publish_odom(self, st: Dict[str, Any]) -> None:
         msg = Odometry()
-        msg.header = self._header(self.frame_map, st.t)
+        msg.header = self._header(self.frame_map)
         msg.child_frame_id = self.frame_base
-        msg.pose.pose.position.x = st.x
-        msg.pose.pose.position.y = st.y
-        msg.pose.pose.position.z = st.z
-        # yaw-only quaternion
-        half = 0.5 * st.yaw
+        msg.pose.pose.position.x = float(st['x'])
+        msg.pose.pose.position.y = float(st['y'])
+        msg.pose.pose.position.z = float(st['z'])
+        half = 0.5 * float(st['yaw'])
         msg.pose.pose.orientation.z = float(np.sin(half))
         msg.pose.pose.orientation.w = float(np.cos(half))
-        msg.twist.twist.linear.x = st.vx
-        msg.twist.twist.linear.y = st.vy
-        msg.twist.twist.linear.z = st.vz
-        msg.twist.twist.angular.z = st.yaw_rate
+        msg.twist.twist.linear.x = float(st.get('vx', 0.0))
+        msg.twist.twist.linear.y = float(st.get('vy', 0.0))
+        msg.twist.twist.linear.z = float(st.get('vz', 0.0))
+        msg.twist.twist.angular.z = float(st.get('yaw_rate', 0.0))
         self.pub_odom.publish(msg)
+        if self.pub_sim_odom is not None:
+            self.pub_sim_odom.publish(msg)
 
         if self._tf_broadcaster is not None:
             tf = TransformStamped()
             tf.header = msg.header
             tf.child_frame_id = self.frame_base
-            tf.transform.translation.x = st.x
-            tf.transform.translation.y = st.y
-            tf.transform.translation.z = st.z
+            tf.transform.translation.x = msg.pose.pose.position.x
+            tf.transform.translation.y = msg.pose.pose.position.y
+            tf.transform.translation.z = msg.pose.pose.position.z
             tf.transform.rotation = msg.pose.pose.orientation
             self._tf_broadcaster.sendTransform(tf)
 
 
-def main(args=None) -> None:
+def main(args: Optional[List[str]] = None) -> None:
     rclpy.init(args=args)
     node = SensorSuiteNode()
     try:

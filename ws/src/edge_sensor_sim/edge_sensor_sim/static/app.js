@@ -10,6 +10,8 @@ const els = {
   clock: document.getElementById('clock'),
   cycle: document.getElementById('cycle'),
   camMode: document.getElementById('camMode'),
+  source: document.getElementById('source'),
+  mapSelect: document.getElementById('mapSelect'),
   p_speed: document.getElementById('p_speed'),
   p_vel: document.getElementById('p_vel'),
   p_yaw: document.getElementById('p_yaw'),
@@ -706,6 +708,14 @@ function applyPhysics(msg) {
 
   els.clock.textContent = `t = ${fmt(msg.t, 2)} s`;
   els.cycle.textContent = `cycle ${msg.cycle ?? 0}`;
+  if (els.source) {
+    const src = msg.source || msg.map_id || '—';
+    els.source.textContent = src;
+  }
+  if (els.mapSelect && msg.map_id && els.mapSelect.value !== msg.map_id) {
+    const opt = [...els.mapSelect.options].find((o) => o.value === msg.map_id);
+    if (opt) els.mapSelect.value = msg.map_id;
+  }
 }
 
 function applyCharts(msg) {
@@ -768,13 +778,45 @@ function connectWs() {
   };
 }
 
+async function loadCatalog() {
+  if (!els.mapSelect) return;
+  try {
+    const cat = await fetch('/api/catalog').then((r) => r.json());
+    const maps = cat.maps || [];
+    const active = cat.active?.map_id || '';
+    els.mapSelect.innerHTML = '';
+    for (const m of maps) {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.title || m.id;
+      els.mapSelect.appendChild(opt);
+    }
+    if (active) els.mapSelect.value = active;
+    els.mapSelect.onchange = async () => {
+      const map_id = els.mapSelect.value;
+      try {
+        await fetch('/api/select', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ map_id }),
+        });
+      } catch (_) { /* ignore */ }
+    };
+    // Disable map switch while replaying a fixed stream
+    els.mapSelect.disabled = (cat.mode || '') === 'replay';
+  } catch (_) { /* starting */ }
+}
+
 async function bootstrap() {
+  await loadCatalog();
   try {
     const st = await fetch('/api/status').then((r) => r.json());
     const lid = await fetch('/api/lidar').then((r) => r.json()).catch(() => null);
     applyTickFull({
       t: st.t,
       cycle: st.cycle,
+      map_id: st.map_id,
+      source: st.source,
       imu: st.latest?.imu,
       gnss: st.latest?.gnss,
       odom: st.latest?.odom,

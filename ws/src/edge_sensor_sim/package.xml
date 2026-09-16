@@ -4,8 +4,8 @@
   <name>edge_sensor_sim</name>
   <version>0.1.0</version>
   <description>
-    Synthetic haul-truck edge sensors (IMU, GNSS, LiDAR) with pure-Python models
-    and a ROS 2 publisher node.
+    Synthetic haul-truck edge sensors (IMU, GNSS, LiDAR). StreamHub is the sole
+    multi-map generator; ROS and the web visualizer subscribe to that stream.
   </description>
   <maintainer email="dev@example.com">edge_sensor_sim</maintainer>
   <license>Apache-2.0</license>

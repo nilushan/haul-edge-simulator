@@ -81,6 +81,22 @@ h1 {
 }
 .badge.ok { color: var(--ok); border-color: rgba(62, 207, 142, 0.4); }
 .badge.bad { color: var(--bad); border-color: rgba(240, 113, 120, 0.4); }
+.badge.select {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  pointer-events: auto;
+}
+.badge.select select {
+  background: transparent;
+  color: var(--text);
+  border: none;
+  font: inherit;
+  max-width: 11rem;
+  cursor: pointer;
+}
+.badge.select select:focus { outline: none; }
+.badge.select option { background: var(--panel-solid); color: var(--text); }
 
 .hud {
   top: 4.5rem;
