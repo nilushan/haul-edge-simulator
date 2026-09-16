@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Haul edge — physics view</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="scene3d"></canvas>
+
+    <header class="overlay top">
+      <div>
+        <h1>Haul truck edge suite</h1>
+        <p class="sub">Sensor bus / StreamHub · detection layers · edge alerts</p>
+      </div>
+      <div class="badges">
+        <label class="badge select">
+          map
+          <select id="mapSelect" title="Switch live map"></select>
+        </label>
+        <span id="source" class="badge">source —</span>
+        <span id="conn" class="badge bad">WS offline</span>
+        <span id="clock" class="badge">t = 0.00 s</span>
+        <span id="cycle" class="badge">cycle 0</span>
+        <span id="camMode" class="badge">follow vehicle</span>
+        <span id="alertBadge" class="badge">alerts 0</span>
+      </div>
+    </header>
+
+    <!-- Physics HUD -->
+    <aside class="overlay hud left">
+      <h2>Kinematics</h2>
+      <div class="row"><span>Ground speed</span><b id="p_speed">—</b></div>
+      <div class="row"><span>v<sub>ENU</sub></span><b id="p_vel">—</b></div>
+      <div class="row"><span>Course / yaw</span><b id="p_yaw">—</b></div>
+      <div class="row"><span>Pitch / roll</span><b id="p_att">—</b></div>
+      <div class="row"><span>Position ENU</span><b id="p_pos">—</b></div>
+      <div class="row"><span>Altitude (GNSS)</span><b id="p_alt">—</b></div>
+
+      <h2>Dynamics (body)</h2>
+      <div class="row"><span>Specific force</span><b id="p_sf">—</b></div>
+      <div class="row"><span>a<sub>horiz</sub> / vertical g</span><b id="p_g">—</b></div>
+      <div class="row"><span>Yaw rate</span><b id="p_yr">—</b></div>
+      <div class="row"><span>Pitch / roll rate</span><b id="p_pr">—</b></div>
+      <div class="row"><span>Centripetal (est.)</span><b id="p_cent">—</b></div>
+
+      <h2>Sensors</h2>
+      <div class="row"><span>GNSS fix</span><b id="p_fix">—</b></div>
+      <div class="row"><span>Lat / Lon</span><b id="p_ll">—</b></div>
+      <div class="row"><span>LiDAR returns</span><b id="p_lidar">—</b></div>
+
+      <h2>Detection layers</h2>
+      <div class="toggles" id="layerToggles">
+        <label class="tog"><input type="checkbox" id="togRaw" checked /> raw scan</label>
+        <label class="tog"><input type="checkbox" id="togMap" checked /> prior map</label>
+        <label class="tog"><input type="checkbox" id="togGround" /> ground</label>
+        <label class="tog"><input type="checkbox" id="togObstacles" checked /> obstacles</label>
+        <label class="tog"><input type="checkbox" id="togRocks" checked /> rocks</label>
+        <label class="tog"><input type="checkbox" id="togBunds" checked /> bunds</label>
+        <label class="tog"><input type="checkbox" id="togMarkers" /> markers</label>
+        <label class="tog"><input type="checkbox" id="togFullScan" checked /> full 360°</label>
+      </div>
+      <div class="row"><span>Rocks / bunds pts</span><b id="p_detect">—</b></div>
+      <div class="row"><span>Vibe RMS a<sub>z</sub></span><b id="p_vibe">—</b></div>
+    </aside>
+
+    <aside class="overlay hud right">
+      <h2>Accelerometer <small>m/s²</small></h2>
+      <canvas id="chartAccel" height="110"></canvas>
+      <h2>Gyro <small>deg/s</small></h2>
+      <canvas id="chartGyro" height="110"></canvas>
+      <h2>Speed <small>km/h</small> · vertical load <small>g</small></h2>
+      <canvas id="chartSpeed" height="90"></canvas>
+
+      <h2>Edge alerts</h2>
+      <div id="alertFeed" class="alert-feed" aria-live="polite">
+        <div class="alert-empty">No alerts yet</div>
+      </div>
+      <p class="hint">1 follow · 2 top · 3 free · M clear map · detection clouds from /edge/* bus topics</p>
+    </aside>
+
+    <div class="overlay legend">
+      <span class="swatch map-old"></span> map
+      <span class="swatch scan-now"></span> raw scan
+      <span class="swatch rock"></span> rocks (ahead)
+      <span class="swatch bund"></span> bunds (always)
+      <span class="swatch obstacle"></span> obstacles
+      <span class="swatch truck"></span> truck
+    </div>
+  </div>
+</body>
+</html>

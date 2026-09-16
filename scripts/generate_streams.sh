@@ -2,7 +2,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-export PYTHONPATH="${ROOT}/ws/src/edge_sim${PYTHONPATH:+:$PYTHONPATH}"
+# shellcheck disable=SC1091
+source "${ROOT}/scripts/env_pythonpath.sh"
 SECONDS_LEN="${SECONDS_LEN:-60}"
 OUT="${OUT:-${ROOT}/data/streams}"
 python3 -m edge_sim.tools.generate_stream \

@@ -9,10 +9,11 @@ if ! python3 -c 'import aiohttp' 2>/dev/null; then
   pip3 install --user -q aiohttp || pip3 install -q aiohttp
 fi
 
-export PYTHONPATH="${ROOT}/ws/src/edge_sim:${ROOT}/ws/src/edge_viz:${ROOT}/ws/src/edge_sensor_source${PYTHONPATH:+:$PYTHONPATH}"
+# shellcheck disable=SC1091
+source "${ROOT}/scripts/env_pythonpath.sh"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8099}"
-DURATION="${DURATION:-60}"
+DURATION="${DURATION:-600}"
 STREAM_MODE="${STREAM_MODE:-live}"
 MAPS="${MAPS:-haul_corridor,tight_switchbacks,open_pit_bench,rocky_descent}"
 STREAMS_ROOT="${STREAMS_ROOT:-${ROOT}/data/streams}"
@@ -28,5 +29,5 @@ exec python3 -m edge_viz.run_from_hub \
   ${STREAM_PATH:+--stream "${STREAM_PATH}"} \
   --imu-hz 50 \
   --gnss-hz 5 \
-  --lidar-hz 5 \
+  --lidar-hz 10 \
   --ws-hz 10

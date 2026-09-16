@@ -3,7 +3,7 @@
 set -euo pipefail
 
 MODE="${MODE:-viz}"
-DURATION="${DURATION:-60}"
+DURATION="${DURATION:-600}"
 VIZ_HOST="${VIZ_HOST:-0.0.0.0}"
 VIZ_PORT="${VIZ_PORT:-8099}"
 STREAM_MODE="${STREAM_MODE:-live}"
@@ -17,14 +17,22 @@ set +u
 source /opt/ros/jazzy/setup.bash
 set -u
 
-# Editable multi-package path (before colcon install)
-export PYTHONPATH="/project/ws/src/edge_sim:/project/ws/src/edge_sensor_source:/project/ws/src/edge_processor:/project/ws/src/edge_viz:/project/ws/src/edge_bringup${PYTHONPATH:+:$PYTHONPATH}"
+# Editable multi-package path (libs/ + nodes/ + bringup/)
+# shellcheck disable=SC1091
+source /project/scripts/env_pythonpath.sh
 cd /project
+
+PKGS=(
+  edge_sim edge_perception
+  edge_sensor_source edge_processor
+  edge_rock_detect edge_bund_detect edge_vibe_detect edge_event_store
+  edge_viz edge_bringup
+)
 
 build_ros_pkgs() {
   echo "[entrypoint] Building packages (colcon)..."
   cd /project/ws
-  colcon build --packages-select edge_sim edge_sensor_source edge_processor edge_viz edge_bringup --symlink-install
+  colcon build --packages-select "${PKGS[@]}" --symlink-install
   set +u
   # shellcheck disable=SC1091
   source /project/ws/install/setup.bash
@@ -41,7 +49,7 @@ hub_args=(
   --streams-root "${STREAMS_ROOT}"
   --imu-hz 50
   --gnss-hz 5
-  --lidar-hz 5
+  --lidar-hz 10
   --ws-hz 10
 )
 if [[ -n "${STREAM_PATH}" ]]; then
@@ -60,10 +68,10 @@ case "${MODE}" in
     ;;
   edge)
     build_ros_pkgs
-    echo "[entrypoint] Edge stack: sensor_source + processor + viz_from_bus"
+    echo "[entrypoint] Edge stack: source + detectors + event_store + viz_from_bus"
     echo "[entrypoint] Browser → http://127.0.0.1:${VIZ_PORT}/"
     exec ros2 launch edge_bringup edge_vehicle.launch.py \
-      use_sim:=true use_processor:=true use_viz:=true viz_port:="${VIZ_PORT}"
+      use_sim:=true use_processor:=false use_viz:=true viz_port:="${VIZ_PORT}"
     ;;
   ros)
     build_ros_pkgs

@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'ws' / 'src' / 'edge_sim'))
+sys.path.insert(0, str(ROOT / 'ws' / 'src' / 'libs' / 'edge_sim'))
 
 from edge_sim.tools.generate_offline import main  # noqa: E402
 

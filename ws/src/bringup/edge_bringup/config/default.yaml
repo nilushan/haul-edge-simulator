@@ -1,0 +1,70 @@
+sensor_source:
+  ros__parameters:
+    imu_hz: 100.0
+    gnss_hz: 5.0
+    lidar_hz: 10.0
+    # denser hub cloud (sensor_source → StreamHub)
+    odom_hz: 50.0
+    speed_mps: 8.0
+    duration_s: 600.0
+    imu_topic: /imu/data
+    gnss_topic: /gnss/fix
+    lidar_topic: /lidar
+    odom_topic: /odom
+    sim_odom_topic: /sim/ground_truth/odom
+    frame_base: base_link
+    frame_imu: imu_link
+    frame_lidar: lidar_link
+    frame_map: map
+    publish_tf: true
+
+edge_processor:
+  ros__parameters:
+    lidar_topic: /lidar
+    processed_lidar_topic: /edge/lidar/processed
+    edge_status_topic: /edge/status
+    max_points: 2000
+    z_min: -1.0
+    z_max: 5.0
+
+edge_rock_detect:
+  ros__parameters:
+    lidar_topic: /lidar
+    rocks_cloud_topic: /edge/lidar/rocks
+    obstacles_cloud_topic: /edge/lidar/obstacles
+    ground_cloud_topic: /edge/lidar/ground
+    detections_topic: /edge/detections
+    alerts_topic: /edge/alerts
+    status_topic: /edge/status
+    vehicle_id: haul-01
+    alert_min_conf: 0.55
+    publish_ground: true
+
+edge_bund_detect:
+  ros__parameters:
+    lidar_topic: /lidar
+    bunds_cloud_topic: /edge/lidar/bunds
+    detections_topic: /edge/detections
+    alerts_topic: /edge/alerts
+    status_topic: /edge/status
+    vehicle_id: haul-01
+    alert_cooldown_s: 5.0
+
+edge_vibe_detect:
+  ros__parameters:
+    imu_topic: /imu/data
+    odom_topic: /odom
+    alerts_topic: /edge/alerts
+    features_topic: /edge/vibe/features
+    status_topic: /edge/status
+    vehicle_id: haul-01
+    rms_warn: 1.5
+    rms_crit: 2.5
+    peak_warn: 4.0
+    peak_crit: 6.0
+    min_speed_mps: 1.0
+
+edge_event_store:
+  ros__parameters:
+    alerts_topic: /edge/alerts
+    status_topic: /edge/status

@@ -13,8 +13,9 @@ services:
     ports:
       - "${VIZ_PORT:-8099}:8099"
     environment:
-      PYTHONPATH: /project/ws/src/edge_sim:/project/ws/src/edge_sensor_source:/project/ws/src/edge_processor:/project/ws/src/edge_viz:/project/ws/src/edge_bringup
-      DURATION: ${DURATION:-60}
+      # Overwritten by entrypoint via scripts/env_pythonpath.sh (libs/ + nodes/ + bringup/)
+      PYTHONPATH: /project/ws/src/libs/edge_sim:/project/ws/src/libs/edge_perception:/project/ws/src/nodes/edge_sensor_source:/project/ws/src/nodes/edge_processor:/project/ws/src/nodes/edge_rock_detect:/project/ws/src/nodes/edge_bund_detect:/project/ws/src/nodes/edge_vibe_detect:/project/ws/src/nodes/edge_event_store:/project/ws/src/nodes/edge_viz:/project/ws/src/bringup/edge_bringup
+      DURATION: ${DURATION:-600}
       VIZ_HOST: "0.0.0.0"
       VIZ_PORT: "8099"
       MODE: ${MODE:-viz}

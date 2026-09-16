@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>edge_perception</name>
+  <version>0.1.0</version>
+  <description>
+    Pure perception library (no ROS nodes): ground, rocks, bunds, vibration,
+    and shared alert/detection schemas. Nodes call into this package.
+  </description>
+  <maintainer email="dev@example.com">edge_perception</maintainer>
+  <license>Apache-2.0</license>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>edge_sim</exec_depend>
+  <test_depend>python3-pytest</test_depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

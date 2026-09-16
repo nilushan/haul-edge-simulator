@@ -1,44 +1,57 @@
 # Code structure
 
-Readable layout: **sim / separate ROS nodes / viz / bringup**.
+Libs and ROS nodes are **separated by folder**. Colcon still discovers every
+package under `ws/src/` recursively.
 
 ```text
 ws/src/
-├── edge_sim/                 # library only (no ROS nodes)
-│   └── edge_sim/
-│       ├── maps.py
-│       ├── models/           # world, vehicle, imu, gnss, lidar
-│       ├── stream/           # StreamHub + JSONL format
-│       ├── topics.py         # shared topic name contract
-│       └── tools/            # generate_stream / generate_offline
+├── libs/                         # pure libraries (no ROS nodes)
+│   ├── edge_sim/                 # maps, sensor models, StreamHub, topic contract
+│   │   └── edge_sim/
+│   │       ├── maps.py
+│   │       ├── models/           # world, vehicle, imu, gnss, lidar
+│   │       ├── stream/           # StreamHub + JSONL format
+│   │       ├── topics.py         # shared bus topic names
+│   │       └── tools/
+│   └── edge_perception/          # detection algorithms + schemas
+│       └── edge_perception/
+│           ├── schema.py         # Detection / AlertEvent
+│           ├── geometry.py
+│           ├── ground.py
+│           ├── rocks.py
+│           ├── bunds.py
+│           ├── vibration.py
+│           └── cloud_io.py
 │
-├── edge_sensor_source/       # ROS node package
-│   └── sensor_source_node    # StreamHub → /imu /gnss /lidar /odom
+├── nodes/                        # ROS node packages (thin wrappers)
+│   ├── edge_sensor_source/       # StreamHub → bus topics
+│   ├── edge_processor/           # example /lidar → /edge/lidar/processed
+│   ├── edge_rock_detect/         # rocks cloud + alerts
+│   ├── edge_bund_detect/         # bunds cloud + alerts
+│   ├── edge_vibe_detect/         # IMU vibration alerts
+│   ├── edge_event_store/         # /edge/alerts → SQLite
+│   └── edge_viz/                 # browser UI (hub or bus mode)
 │
-├── edge_processor/           # ROS node package
-│   └── processor_node        # /lidar → /edge/lidar/processed
-│
-├── edge_viz/                 # web UI package
-│   └── edge_viz/
-│       ├── app.py            # HTTP + WebSocket server
-│       ├── run_from_hub.py   # DEV: read StreamHub
-│       ├── run_from_bus.py   # EDGE: subscribe ROS topics
-│       ├── bus_ingress.py    # ROS subscriptions for viz
-│       ├── tick_buffer.py
-│       └── static/           # browser UI
-│
-└── edge_bringup/             # launch + config only
-    ├── launch/edge_vehicle.launch.py
-    └── config/
+└── bringup/                      # launch + config only
+    └── edge_bringup/
+        ├── launch/
+        └── config/
 ```
 
-## Why separate ROS packages?
+## Why split libs vs nodes?
 
-Each node is its own package so you can:
+| Folder | Contains | Depends on ROS? |
+|---|---|---|
+| `libs/` | algorithms, models, schemas, stream I/O | No (except optional message helpers) |
+| `nodes/` | `rclpy` nodes, topic wiring, params | Yes |
+| `bringup/` | launch files + YAML | launch only |
 
-- run / replace one node without touching others  
-- swap `edge_sensor_source` for real drivers or bag play  
-- grow processors (`edge_ground_seg`, `edge_detect`, …) as new packages  
+Rules:
+
+- Detectors **call** `edge_perception` — they do not reimplement geometry.
+- Sources **call** `edge_sim` — they do not own world math.
+- Viz never imports detector internals; it only subscribes to bus topics.
+- You can unit-test libs with plain `pytest` (no ROS daemon).
 
 ## Data flow
 
@@ -47,9 +60,21 @@ DEV
   edge_sim.StreamHub ──► edge_viz.run_from_hub ──► browser
 
 EDGE
-  edge_sensor_source ──publish──► ROS topics
-  edge_processor     ──subscribe/publish──► /edge/*
-  edge_viz.run_from_bus ──subscribe──► browser
+  edge_sensor_source ──publish──► ROS bus (/imu /gnss /lidar /odom)
+        │
+        ├─► edge_rock_detect  ──► /edge/lidar/rocks  /edge/detections /edge/alerts
+        ├─► edge_bund_detect  ──► /edge/lidar/bunds  /edge/detections /edge/alerts
+        ├─► edge_vibe_detect  ──► /edge/vibe/features /edge/alerts
+        ├─► edge_event_store  ──► SQLite (local edge storage)
+        └─► edge_viz.run_from_bus ──► browser
+```
+
+## Editable PYTHONPATH
+
+```bash
+source scripts/env_pythonpath.sh
+python3 -m edge_viz.run_from_hub
+pytest ws/src/libs/edge_perception/test
 ```
 
 ## Commands
@@ -57,11 +82,13 @@ EDGE
 ```bash
 # Dev UI (no ROS)
 ./scripts/run_viz.sh
-python3 -m edge_viz.run_from_hub
 
-# Edge stack
+# Edge stack (all detector nodes)
 ros2 launch edge_bringup edge_vehicle.launch.py
 
 # Source only
 ros2 launch edge_bringup sensor_source.launch.py
+
+# Colcon (from ws/)
+colcon build --symlink-install
 ```

@@ -2,15 +2,26 @@
 
 Synthetic on-vehicle sensors for haul-truck edge development.
 
-## Packages (`ws/src`)
+## Layout (`ws/src`)
 
-| Package | What it is |
+| Folder | What |
 |---|---|
-| **edge_sim** | Maps + sensor models + StreamHub (no ROS nodes) |
-| **edge_sensor_source** | ROS node: sim → `/imu/data` `/gnss/fix` `/lidar` `/odom` |
-| **edge_processor** | ROS node: example `/lidar` → `/edge/*` |
-| **edge_viz** | Browser UI (from hub or from ROS bus) |
-| **edge_bringup** | Launch + config |
+| **`libs/`** | Pure libraries — no ROS nodes |
+| **`nodes/`** | ROS node packages |
+| **`bringup/`** | Launch + config |
+
+| Package | Folder | Role |
+|---|---|---|
+| **edge_sim** | libs | Maps + sensor models + StreamHub |
+| **edge_perception** | libs | Rock / bund / vibration algorithms + schemas |
+| **edge_sensor_source** | nodes | Sim → `/imu` `/gnss` `/lidar` `/odom` |
+| **edge_rock_detect** | nodes | `/lidar` → `/edge/lidar/rocks` + alerts |
+| **edge_bund_detect** | nodes | `/lidar` → `/edge/lidar/bunds` + alerts |
+| **edge_vibe_detect** | nodes | `/imu` → vibration alerts |
+| **edge_event_store** | nodes | `/edge/alerts` → SQLite |
+| **edge_processor** | nodes | Example `/lidar` → `/edge/*` stub |
+| **edge_viz** | nodes | Browser UI (hub or bus) |
+| **edge_bringup** | bringup | Launch + config |
 
 See [`docs/STRUCTURE.md`](docs/STRUCTURE.md).
 
@@ -23,7 +34,7 @@ See [`docs/STRUCTURE.md`](docs/STRUCTURE.md).
 
 # Docker
 ./start.sh              # same dev UI
-./start.sh --edge       # full edge stack (separate nodes)
+./start.sh --edge       # full edge stack (detectors + viz)
 ./start.sh --ros        # sensor source node only
 ```
 
@@ -33,7 +44,10 @@ See [`docs/STRUCTURE.md`](docs/STRUCTURE.md).
 ros2 launch edge_bringup edge_vehicle.launch.py
 # nodes:
 #   edge_sensor_source / sensor_source
-#   edge_processor     / edge_processor
+#   edge_rock_detect   / edge_rock_detect
+#   edge_bund_detect   / edge_bund_detect
+#   edge_vibe_detect   / edge_vibe_detect
+#   edge_event_store   / edge_event_store
 #   edge_viz           / viz_from_bus
 ```
 
@@ -57,6 +71,8 @@ STREAM_MODE=replay ./scripts/run_viz.sh
 
 ## Architecture note
 
+- **Libs** (`ws/src/libs`) hold algorithms and schemas; unit-test without ROS.
+- **Nodes** (`ws/src/nodes`) are thin ROS wrappers around libs.
 - **Dev:** browser reads StreamHub in-process (`edge_viz.run_from_hub`).  
-- **Edge:** browser UI is fed by ROS subscriptions (`edge_viz.run_from_bus` → `bus_ingress`).  
+- **Edge:** browser UI is fed by ROS subscriptions (`edge_viz.run_from_bus`).  
 - Browser never speaks ROS; it only uses WebSocket `/ws`.

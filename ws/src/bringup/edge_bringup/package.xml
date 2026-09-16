@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>edge_bringup</name>
+  <version>0.3.0</version>
+  <description>Launch files and config for the haul-edge vehicle stack.</description>
+  <maintainer email="dev@example.com">edge_bringup</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>edge_sim</exec_depend>
+  <exec_depend>edge_perception</exec_depend>
+  <exec_depend>edge_sensor_source</exec_depend>
+  <exec_depend>edge_processor</exec_depend>
+  <exec_depend>edge_rock_detect</exec_depend>
+  <exec_depend>edge_bund_detect</exec_depend>
+  <exec_depend>edge_vibe_detect</exec_depend>
+  <exec_depend>edge_event_store</exec_depend>
+  <exec_depend>edge_viz</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ros2launch</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

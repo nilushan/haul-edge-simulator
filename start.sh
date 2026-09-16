@@ -11,7 +11,7 @@
 #   ./start.sh --build-only # build image and exit
 #
 # Env:
-#   VIZ_PORT=8099  DURATION=60  MODE=viz|edge|ros|all|shell
+#   VIZ_PORT=8099  DURATION=600  MODE=viz|edge|ros|all|shell
 #   STREAM_MODE=live|replay  MAPS=id,id  STREAM_PATH=/path  STREAMS_ROOT=data/streams
 set -euo pipefail
 
@@ -24,7 +24,7 @@ export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-haul-edge-sim}"
 
 MODE="${MODE:-viz}"
 VIZ_PORT="${VIZ_PORT:-8099}"
-DURATION="${DURATION:-60}"
+DURATION="${DURATION:-600}"
 STREAM_MODE="${STREAM_MODE:-live}"
 MAPS="${MAPS:-haul_corridor,tight_switchbacks,open_pit_bench,rocky_descent}"
 STREAMS_ROOT="${STREAMS_ROOT:-/project/data/streams}"
@@ -69,7 +69,7 @@ echo " haul-edge-sim"
 echo "   mode:        ${MODE}"
 echo "   stream:      ${STREAM_MODE}"
 echo "   maps:        ${MAPS}"
-echo "   duration:    ${DURATION}s / map (loop + cycle)"
+echo "   duration:    ${DURATION}s / map (~$(( DURATION / 60 )) min, loop, no map cycle)"
 echo "   viz port:    ${VIZ_PORT}"
 echo "============================================================"
 
@@ -99,7 +99,7 @@ if [[ "${MODE}" == "ros" || "${MODE}" == "all" || "${MODE}" == "edge" ]]; then
   echo "[start] Bus topics: /imu/data /gnss/fix /lidar /odom"
 fi
 if [[ "${MODE}" == "edge" ]]; then
-  echo "[start] Edge path: sim → bus → processor_stub → viz_bus"
+  echo "[start] Edge path: sim → bus → rock/bund/vibe detect → event_store → viz_bus"
 fi
 
 exec docker compose -f docker/docker-compose.yml run --rm --service-ports \
