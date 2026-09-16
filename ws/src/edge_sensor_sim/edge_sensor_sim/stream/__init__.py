@@ -1,7 +1,7 @@
-"""Replayable multi-map sensor stream (sole data source for viz / ROS)."""
+"""Sensor stream application core: sole live/replay generator."""
 
 from .format import StreamManifest, StreamReader, StreamWriter, discover_streams
-from .hub import StreamConfig, StreamHub
+from .hub import StreamConfig, StreamHub, record_map_stream
 
 __all__ = [
     'StreamConfig',
@@ -10,4 +10,5 @@ __all__ = [
     'StreamReader',
     'StreamWriter',
     'discover_streams',
+    'record_map_stream',
 ]

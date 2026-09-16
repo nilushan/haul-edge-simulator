@@ -13,20 +13,20 @@ import os
 import threading
 from typing import List, Optional
 
-from edge_sensor_sim.maps import DEFAULT_PLAYLIST
+from edge_sensor_sim.adapters.web.hub_server import build_hub_from_args, create_app
+from edge_sensor_sim.domain.maps import DEFAULT_PLAYLIST
 from edge_sensor_sim.stream.hub import StreamHub
-from edge_sensor_sim.viz_server import build_hub_from_args, create_app
 
 log = logging.getLogger('edge_sensor_sim.stream_server')
 
 
 def _start_ros_bridge(hub: StreamHub) -> threading.Thread:
-    """Spin sensor_suite_node against the shared hub in a background thread."""
+    """Spin sensor source node against the shared hub in a background thread."""
 
     def _run() -> None:
         try:
             import rclpy
-            from edge_sensor_sim.sensor_suite_node import SensorSuiteNode
+            from edge_sensor_sim.adapters.ros.sensor_source_node import SensorSuiteNode
         except ImportError as exc:
             log.error('ROS bridge requested but rclpy unavailable: %s', exc)
             return

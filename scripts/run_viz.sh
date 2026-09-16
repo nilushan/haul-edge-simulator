@@ -18,7 +18,7 @@ MAPS="${MAPS:-haul_corridor,tight_switchbacks,open_pit_bench,rocky_descent}"
 STREAMS_ROOT="${STREAMS_ROOT:-${ROOT}/data/streams}"
 
 echo "Open http://${HOST}:${PORT}/  (StreamHub mode=${STREAM_MODE})"
-exec python3 -m edge_sensor_sim.stream_server \
+exec python3 -m edge_sensor_sim.apps.stream_server \
   --host "${HOST}" \
   --port "${PORT}" \
   --duration "${DURATION}" \

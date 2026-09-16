@@ -57,7 +57,7 @@ fi
 case "${MODE}" in
   shell)
     echo "[entrypoint] Interactive shell."
-    echo "  Dev UI:   python3 -m edge_sensor_sim.stream_server"
+    echo "  Dev UI:   python3 -m edge_sensor_sim.apps.stream_server"
     echo "  Edge bus: ros2 launch edge_sensor_sim edge_vehicle.launch.py"
     exec bash
     ;;
@@ -72,17 +72,17 @@ case "${MODE}" in
   ros)
     build_ros_pkg
     echo "[entrypoint] Sole StreamHub → ROS publishers only"
-    exec python3 -m edge_sensor_sim.stream_server "${stream_args[@]}" --ros --no-viz
+    exec python3 -m edge_sensor_sim.apps.stream_server "${stream_args[@]}" --ros --no-viz
     ;;
   all|viz+ros|ros+viz)
     build_ros_pkg
     echo "[entrypoint] Sole StreamHub → viz + ROS (shared hub, dev shortcut)"
     echo "[entrypoint] Browser UI → http://127.0.0.1:${VIZ_PORT}/"
-    exec python3 -m edge_sensor_sim.stream_server "${stream_args[@]}" --ros
+    exec python3 -m edge_sensor_sim.apps.stream_server "${stream_args[@]}" --ros
     ;;
   viz|*)
     echo "[entrypoint] Dev path: StreamHub → visualizer (no ROS bus)"
     echo "[entrypoint] Open http://127.0.0.1:${VIZ_PORT}/  | edge mode: MODE=edge"
-    exec python3 -m edge_sensor_sim.stream_server "${stream_args[@]}"
+    exec python3 -m edge_sensor_sim.apps.stream_server "${stream_args[@]}"
     ;;
 esac

@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PKG = ROOT / 'ws' / 'src' / 'edge_sensor_sim'
 sys.path.insert(0, str(PKG))
 
-from edge_sensor_sim.generate_offline import main  # noqa: E402
+from edge_sensor_sim.adapters.files.generate_offline import main  # noqa: E402
 
 if __name__ == '__main__':
     raise SystemExit(main())

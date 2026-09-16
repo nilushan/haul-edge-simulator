@@ -1,4 +1,4 @@
-"""Unit tests for pure sensor models (no ROS)."""
+"""Unit tests for pure domain sensor models (no ROS)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import math
 
 import numpy as np
 
-from edge_sensor_sim.models import (
+from edge_sensor_sim.domain.models import (
     GnssSimulator,
     HaulWorld,
     ImuSimulator,
@@ -52,6 +52,5 @@ def test_lidar_returns_points():
     assert fr.points.ndim == 2 and fr.points.shape[1] == 3
     assert fr.points.shape[0] > 30
     assert fr.intensity.shape[0] == fr.points.shape[0]
-    # Not a filled rectangle: ring pattern → varying ranges
     rng = np.linalg.norm(fr.points, axis=1)
     assert rng.std() > 0.5

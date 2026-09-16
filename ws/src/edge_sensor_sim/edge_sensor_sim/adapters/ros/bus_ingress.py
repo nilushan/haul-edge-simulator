@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 
 from edge_sensor_sim.bus.contract import SensorBusContract, default_bus_contract
-from edge_sensor_sim.bus.tick_buffer import TickBuffer, TickBufferConfig
+from edge_sensor_sim.bus.tick_buffer import TickBuffer
 
 
 def _stamp_to_t(stamp: Any) -> float:

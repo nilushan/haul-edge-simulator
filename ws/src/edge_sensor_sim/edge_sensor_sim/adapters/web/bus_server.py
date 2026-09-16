@@ -5,7 +5,7 @@ Edge visualizer that subscribes to the ROS sensor bus (not StreamHub).
 Use this when you want the UI to behave like production:
   any source on the bus (sim, bag, real drivers) → same viz.
 
-  python3 -m edge_sensor_sim.viz_bus_server --port 8099
+  python3 -m edge_sensor_sim.adapters.web.bus_server --port 8099
 """
 
 from __future__ import annotations
@@ -16,10 +16,10 @@ import os
 import threading
 from typing import List, Optional
 
+from edge_sensor_sim.adapters.ros.bus_ingress import RosBusIngress
+from edge_sensor_sim.adapters.web.hub_server import create_app
 from edge_sensor_sim.bus.contract import SensorBusContract
-from edge_sensor_sim.bus.ros_ingress import RosBusIngress
 from edge_sensor_sim.bus.tick_buffer import TickBuffer, TickBufferConfig
-from edge_sensor_sim.viz_server import create_app
 
 log = logging.getLogger('edge_sensor_sim.viz_bus')
 

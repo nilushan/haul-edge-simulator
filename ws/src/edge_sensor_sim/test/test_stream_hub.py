@@ -1,11 +1,11 @@
-"""Tests for multi-map StreamHub (sole sensor source) and replay format."""
+"""Tests for multi-map StreamHub and replay format."""
 
 from __future__ import annotations
 
 import time
 from pathlib import Path
 
-from edge_sensor_sim.maps import MAPS, get_map, list_maps
+from edge_sensor_sim.domain.maps import MAPS, get_map, list_maps
 from edge_sensor_sim.stream.format import StreamReader, discover_streams
 from edge_sensor_sim.stream.hub import StreamConfig, StreamHub, record_map_stream
 
@@ -20,7 +20,6 @@ def test_map_catalog():
 def test_maps_differ():
     a = get_map('haul_corridor').build_world()
     b = get_map('tight_switchbacks').build_world()
-    # Different geometry / rock counts
     assert len(a.rocks) != len(b.rocks) or a.road_hw != b.road_hw
     x0, y0, _ = a.centerline(100.0)
     x1, y1, _ = b.centerline(100.0)
@@ -95,7 +94,6 @@ def test_record_and_replay(tmp_path: Path):
 
 
 def test_viz_subscribes_only_via_hub_api():
-    """Visualizer contract: read snapshot/live_tick — never own models."""
     hub = StreamHub(
         StreamConfig(
             mode='live',
@@ -118,5 +116,4 @@ def test_viz_subscribes_only_via_hub_api():
     hub.stop()
     unsub()
     assert 'open_pit_bench' in seen
-    # Subscriber API is the only data path used by viz pump
     assert hub.live_tick()['type'] == 'tick'

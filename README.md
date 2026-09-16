@@ -20,23 +20,17 @@ Details: [`docs/EDGE_ARCHITECTURE.md`](docs/EDGE_ARCHITECTURE.md).
 
 ```text
 haul-edge-sim/
-├── data/streams/           # replayable multi-map streams (JSONL)
-├── docker/                 # Jazzy runner
-├── scripts/
-│   ├── run_viz.sh          # host StreamHub + viz subscriber
-│   ├── generate_streams.sh # pre-record all maps
-│   └── generate_offline.py # legacy CSV dump
-└── ws/src/edge_sensor_sim/
-    ├── edge_sensor_sim/
-    │   ├── maps.py         # map presets
-    │   ├── stream/         # hub + replay format
-    │   ├── stream_server.py
-    │   ├── viz_server.py   # HTTP/WS subscriber UI
-    │   ├── sensor_suite_node.py  # ROS subscriber/bridge
-    │   └── models/         # pure Python IMU/GNSS/LiDAR/vehicle/world
-    ├── launch/
-    └── config/
+├── data/streams/              # replayable multi-map streams (JSONL)
+├── docker/  scripts/  docs/
+└── ws/src/edge_sensor_sim/edge_sensor_sim/
+    ├── domain/                # maps + pure sensor models
+    ├── stream/                # sole live/replay generator
+    ├── bus/                   # topic contract + tick buffer
+    ├── adapters/ros|web|files # ROS, browser UI, recording
+    └── apps/                  # process entrypoints
 ```
+
+Full layout: [`docs/STRUCTURE.md`](docs/STRUCTURE.md) · Edge path: [`docs/EDGE_ARCHITECTURE.md`](docs/EDGE_ARCHITECTURE.md)
 
 ## Maps
 
@@ -146,7 +140,7 @@ data/streams/<id>/
 source /opt/ros/jazzy/setup.bash
 cd /project/ws && colcon build --packages-select edge_sensor_sim && source install/setup.bash
 # preferred: sole hub + ROS
-python3 -m edge_sensor_sim.stream_server --ros --no-viz --maps haul_corridor
+python3 -m edge_sensor_sim.apps.stream_server --ros --no-viz --maps haul_corridor
 ros2 topic hz /lidar /imu/data /gnss/fix
 ```
 

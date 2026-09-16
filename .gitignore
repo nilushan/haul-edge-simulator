@@ -1,12 +1,28 @@
+# data bulk (keep data/README.md)
 data/**
 !data/README.md
+
+# python / tooling
 .DS_Store
 __pycache__/
 *.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .venv/
 venv/
+
+# ROS colcon
 ws/build/
 ws/install/
 ws/log/
+
+# bags / captures
 *.bag
 *.mcap
+*.db3

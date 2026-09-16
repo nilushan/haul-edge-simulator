@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from typing import List, Optional
 
-from edge_sensor_sim.maps import DEFAULT_PLAYLIST, MAPS, list_maps
+from edge_sensor_sim.domain.maps import DEFAULT_PLAYLIST, MAPS, list_maps
 from edge_sensor_sim.stream.format import default_streams_root, discover_streams
 from edge_sensor_sim.stream.hub import record_map_stream
 

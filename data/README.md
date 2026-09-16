@@ -2,8 +2,7 @@
 
 | Path | Purpose |
 |---|---|
-| `sample_run/` | Legacy offline CSV dump (`generate_offline.py`) |
-| `streams/` | **Replayable multi-map sensor streams** (sole generator format) |
+| `streams/` | Replayable multi-map sensor streams (sole generator format) |
 
 ## Streams layout
 
@@ -16,9 +15,7 @@ data/streams/
     imu.jsonl
     gnss.jsonl
     lidar.jsonl
-  tight_switchbacks/
-  open_pit_bench/
-  rocky_descent/
+  …
 ```
 
 Generate:
@@ -26,7 +23,7 @@ Generate:
 ```bash
 ./scripts/generate_streams.sh
 # or
-python3 -m edge_sensor_sim.generate_stream --seconds 60 --out-root data/streams
+python3 -m edge_sensor_sim.adapters.files.generate_stream --seconds 60 --out-root data/streams
 ```
 
 Replay:
@@ -36,3 +33,5 @@ STREAM_MODE=replay ./scripts/run_viz.sh
 # or
 ./start.sh --replay
 ```
+
+Bulk stream files are gitignored (`data/**`); keep this README tracked.

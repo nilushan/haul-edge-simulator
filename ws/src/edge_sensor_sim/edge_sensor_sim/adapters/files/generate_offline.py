@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from edge_sensor_sim.models import (
+from edge_sensor_sim.domain.models import (
     GnssSimulator,
     HaulWorld,
     ImuSimulator,

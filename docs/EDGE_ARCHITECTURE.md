@@ -128,18 +128,21 @@ Keep `sensor_suite_node` as a **source adapter** for CI and desk dev. It is not 
 
 ## Package layout (logical)
 
+See [`STRUCTURE.md`](STRUCTURE.md) for the full tree. Summary:
+
 ```text
 edge_sensor_sim/
-  bus/                 # contract + TickBuffer + RosBusIngress
-  models/ + stream/    # sim source only
-  sensor_suite_node    # source adapter: hub → bus
-  processor_stub_node  # example consumer/producer on bus
-  viz_server           # dev: hub → WS
-  viz_bus_server       # edge: bus → WS
+  domain/              # maps + pure models
+  stream/              # sole generator (live/replay)
+  bus/                 # topic contract + TickBuffer
+  adapters/ros/        # sensor_source, processor, bus_ingress
+  adapters/web/        # hub_server, bus_server, static UI
+  adapters/files/      # record/offline CLIs
+  apps/                # stream_server process
   launch/edge_vehicle.launch.py
 ```
 
-Later you can split packages (`edge_bus_msgs` policy, `edge_perception`, `edge_viz`) without changing the bus names.
+Later you can split ROS packages without changing bus topic names.
 
 ## Dev vs edge quick reference
 

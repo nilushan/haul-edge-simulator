@@ -13,7 +13,7 @@ from typing import Any, List, Optional, Set
 
 from aiohttp import WSMsgType, web
 
-from edge_sensor_sim.maps import DEFAULT_PLAYLIST
+from edge_sensor_sim.domain.maps import DEFAULT_PLAYLIST
 from edge_sensor_sim.stream.format import default_streams_root
 from edge_sensor_sim.stream.hub import StreamConfig, StreamHub
 

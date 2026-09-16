@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Sequence, Tuple
 
-from edge_sensor_sim.models.world import HaulWorld, PathProfile
+from edge_sensor_sim.domain.models.world import HaulWorld, PathProfile
 
 
 @dataclass(frozen=True)

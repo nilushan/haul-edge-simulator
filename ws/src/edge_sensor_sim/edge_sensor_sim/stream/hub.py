@@ -11,7 +11,7 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Sequence
 
 import numpy as np
 
-from edge_sensor_sim.maps import (
+from edge_sensor_sim.domain.maps import (
     DEFAULT_MAP_ID,
     DEFAULT_PLAYLIST,
     MapSpec,
@@ -19,7 +19,7 @@ from edge_sensor_sim.maps import (
     list_maps,
     resolve_playlist,
 )
-from edge_sensor_sim.models import (
+from edge_sensor_sim.domain.models import (
     GnssSimulator,
     ImuSimulator,
     LidarSimulator,

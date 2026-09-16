@@ -18,7 +18,7 @@ from std_msgs.msg import Header
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 
 from edge_sensor_sim.bus.contract import SensorBusContract
-from edge_sensor_sim.maps import DEFAULT_PLAYLIST
+from edge_sensor_sim.domain.maps import DEFAULT_PLAYLIST
 from edge_sensor_sim.stream.format import default_streams_root
 from edge_sensor_sim.stream.hub import StreamConfig, StreamHub
 
