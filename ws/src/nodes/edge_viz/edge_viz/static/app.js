@@ -147,7 +147,6 @@ function mkChart(id, datasets, yRange) {
     return null;
   }
   const canvas = document.getElementById(id);
-  canvas.style.height = `${canvas.getAttribute('height') || 110}px`;
   return new ChartCtor(canvas, {
     type: 'line',
     data: { datasets },

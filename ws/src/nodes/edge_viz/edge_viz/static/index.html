@@ -68,7 +68,7 @@
       <h2>View</h2>
       <div class="toggles" id="viewToggles">
         <label class="tog"><input type="checkbox" id="togRaw" checked /> raw scan</label>
-        <label class="tog"><input type="checkbox" id="togMap" checked /> prior map</label>
+        <label class="tog"><input type="checkbox" id="togMap" /> prior map</label>
         <label class="tog"><input type="checkbox" id="togDetectMap" checked /> detection map</label>
         <label class="tog"><input type="checkbox" id="togMarkers" checked /> event markers</label>
         <label class="tog"><input type="checkbox" id="togLabels" checked /> event labels</label>
@@ -80,18 +80,22 @@
     </aside>
 
     <aside class="overlay hud right">
-      <h2>Accelerometer <small>m/s²</small></h2>
-      <canvas id="chartAccel" height="110"></canvas>
-      <h2>Gyro <small>deg/s</small></h2>
-      <canvas id="chartGyro" height="110"></canvas>
-      <h2>Speed <small>km/h</small> · vertical load <small>g</small></h2>
-      <canvas id="chartSpeed" height="90"></canvas>
+      <section class="panel-alerts">
+        <h2>Edge alerts</h2>
+        <div id="alertFeed" class="alert-feed" aria-live="polite">
+          <div class="alert-empty">No alerts yet</div>
+        </div>
+      </section>
 
-      <h2>Edge alerts</h2>
-      <div id="alertFeed" class="alert-feed" aria-live="polite">
-        <div class="alert-empty">No alerts yet</div>
-      </div>
-      <p class="hint">1 follow · 2 top · 3 free · M clear map · classes and events from the edge perception pass</p>
+      <section class="panel-charts">
+        <h2>Accelerometer <small>m/s²</small></h2>
+        <div class="chart-box"><canvas id="chartAccel"></canvas></div>
+        <h2>Gyro <small>deg/s</small></h2>
+        <div class="chart-box"><canvas id="chartGyro"></canvas></div>
+        <h2>Speed <small>km/h</small> · vertical load <small>g</small></h2>
+        <div class="chart-box"><canvas id="chartSpeed"></canvas></div>
+        <p class="hint">1 follow · 2 top · 3 free · M clear map · classes and events from the edge perception pass</p>
+      </section>
     </aside>
 
     <div class="overlay legend" id="legend">

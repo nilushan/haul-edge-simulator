@@ -111,7 +111,27 @@ h1 {
   pointer-events: auto;
 }
 .hud.left { left: 1rem; }
-.hud.right { right: 1rem; width: min(380px, 38vw); }
+.hud.right {
+  right: 1rem;
+  width: min(380px, 38vw);
+  /* Alerts pinned on top; the charts column below takes the remaining height. */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.hud.right .panel-alerts { flex: 0 0 auto; }
+.hud.right .panel-charts {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+.hud.right .panel-charts h2:first-child { margin-top: 0.85rem; }
+/* Chart.js fills its container, so the container carries the height. */
+.chart-box {
+  position: relative;
+  height: clamp(70px, 12vh, 112px);
+}
+.chart-box canvas { display: block; }
 
 .hud h2 {
   margin: 0.85rem 0 0.45rem;
@@ -228,7 +248,7 @@ h1 {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
-  max-height: 220px;
+  max-height: min(240px, 30vh);
   overflow: auto;
   margin-top: 0.25rem;
 }
