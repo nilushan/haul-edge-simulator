@@ -174,6 +174,7 @@ class RosBusIngress:
             PointCloud2, c.processed_lidar_topic, self._on_processed_lidar, sensor_qos
         )
         # Detection layers + alert stream
+        node.create_subscription(PointCloud2, c.semantic_cloud_topic, self._on_semantic, sensor_qos)
         node.create_subscription(PointCloud2, c.ground_cloud_topic, self._on_ground, sensor_qos)
         node.create_subscription(PointCloud2, c.obstacles_cloud_topic, self._on_obstacles, sensor_qos)
         node.create_subscription(PointCloud2, c.rocks_cloud_topic, self._on_rocks, sensor_qos)
@@ -208,6 +209,9 @@ class RosBusIngress:
 
     def _on_processed_lidar(self, msg: Any) -> None:
         self.buffer.push_lidar(_cloud_to_lidar_dict(msg, self.max_lidar_points), processed=True)
+
+    def _on_semantic(self, msg: Any) -> None:
+        self.buffer.push_detect_cloud('semantic', _cloud_to_lidar_dict(msg, self.max_lidar_points))
 
     def _on_ground(self, msg: Any) -> None:
         self.buffer.push_detect_cloud('ground', _cloud_to_lidar_dict(msg, self.max_lidar_points))

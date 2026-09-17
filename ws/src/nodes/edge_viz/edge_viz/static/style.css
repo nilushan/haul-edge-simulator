@@ -177,15 +177,33 @@ h1 {
   vertical-align: middle;
 }
 .swatch.map-old { background: #3a4558; }
-.swatch.map-new { background: #6a7a90; box-shadow: inset 0 0 0 1px #9aa8bc; }
-.swatch.scan-now {
-  background: linear-gradient(90deg, #26f0ff, #b8ff4a);
-  box-shadow: 0 0 6px rgba(38, 240, 255, 0.7);
-}
 .swatch.truck { background: var(--truck); }
-.swatch.rock { background: #ffb020; box-shadow: 0 0 6px rgba(255, 176, 32, 0.55); }
-.swatch.bund { background: #3ecfce; }
-.swatch.obstacle { background: #c084fc; }
+
+.legend { flex-wrap: wrap; max-width: min(92vw, 1100px); justify-content: center; }
+.legend-item { display: inline-flex; align-items: center; white-space: nowrap; }
+.legend-item.event .swatch { border-radius: 999px; }
+
+.class-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.4rem;
+  margin: 0.15rem 0 0.35rem;
+}
+.class-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.1rem 0.45rem;
+}
+.class-chip.off { opacity: 0.45; }
+.class-chip .swatch { margin-right: 0; }
+.class-chip b { color: var(--text); font-weight: 560; }
+.tog .swatch { margin-right: 0; }
 
 .toggles {
   display: grid;
@@ -238,6 +256,9 @@ h1 {
   margin-bottom: 0.15rem;
 }
 .alert-item .atype {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
   color: var(--text);
   font-weight: 600;
   text-transform: uppercase;

@@ -14,15 +14,69 @@ class GroundResult:
     hag: np.ndarray  # height above ground per input point (nan if unknown)
 
 
+# One cell of lateral travel may legitimately drop by cell_m * max_slope; more
+# than that is an object standing on the surface, not the surface itself.
+_MAX_REFINE_CELLS = 4_000_000
+
+
+def _pull_down_to_neighbours(
+    ground_z: np.ndarray,
+    cell_keys: np.ndarray,
+    cell_z: np.ndarray,
+    flat: np.ndarray,
+    kx: np.ndarray,
+    ky: np.ndarray,
+    slope_allowance: float,
+    passes: int = 2,
+) -> np.ndarray:
+    """Cap each cell estimate at its lowest neighbour plus one cell of slope."""
+    width = int(ky.max()) + 1
+    height = int(kx.max()) + 1
+    if width <= 0 or height <= 0 or width * height > _MAX_REFINE_CELLS:
+        return ground_z
+
+    grid = np.full((height, width), np.inf, dtype=np.float64)
+    grid[cell_keys // width, cell_keys % width] = cell_z
+    for _ in range(max(int(passes), 1)):
+        capped = grid.copy()
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)):
+            shifted = np.full_like(grid, np.inf)
+            src = grid[
+                max(0, -dx): height - max(0, dx),
+                max(0, -dy): width - max(0, dy),
+            ]
+            shifted[
+                max(0, dx): height - max(0, -dx),
+                max(0, dy): width - max(0, -dy),
+            ] = src
+            capped = np.minimum(capped, shifted + slope_allowance)
+        grid = capped
+
+    refined = grid[kx, ky]
+    known = np.isfinite(ground_z)
+    ground_z = ground_z.copy()
+    ground_z[known] = np.minimum(ground_z[known], refined[known])
+    return ground_z
+
+
 def estimate_ground_grid(
     points: np.ndarray,
     *,
     cell_m: float = 0.75,
     ground_band_m: float = 0.18,
     min_cell_points: int = 2,
+    max_slope: float = 0.35,
 ) -> GroundResult:
     """
-    Estimate ground height independently in each XY grid cell.
+    Estimate ground height per XY grid cell, then pull each cell down towards
+    its neighbours.
+
+    A cell-local estimate rides up anything that fills its own cell, which
+    hides exactly the compact objects worth detecting — a rock covering one
+    cell would read as ground. Each cell is therefore capped at the lowest
+    neighbouring estimate plus what ``max_slope`` allows over one cell, so a
+    rock is measured against the road beside it while real grade changes still
+    pass through.
 
     Non-finite points are left unclassified with a NaN height-above-ground
     value. Returned indices always refer to the original input array.
@@ -64,6 +118,8 @@ def estimate_ground_grid(
     z_s = z[order]
 
     ground_z = np.full(finite_idx.size, np.nan, dtype=np.float64)
+    cell_keys: list[int] = []
+    cell_z: list[float] = []
     i = 0
     while i < finite_idx.size:
         j = i + 1
@@ -72,7 +128,20 @@ def estimate_ground_grid(
         if (j - i) >= min_cell_points:
             gz = float(np.percentile(z_s[i:j], 20.0))
             ground_z[order[i:j]] = gz
+            cell_keys.append(int(flat_s[i]))
+            cell_z.append(gz)
         i = j
+
+    if cell_keys and max_slope > 0:
+        ground_z = _pull_down_to_neighbours(
+            ground_z,
+            np.asarray(cell_keys, dtype=np.int64),
+            np.asarray(cell_z, dtype=np.float64),
+            flat,
+            kx,
+            ky,
+            float(cell_m) * float(max_slope),
+        )
 
     hag[finite_idx] = z - ground_z
     known = np.isfinite(hag)

@@ -7,7 +7,7 @@ from typing import List
 
 import numpy as np
 
-from edge_perception.geometry import pca_extents
+from edge_perception.geometry import euclidean_clusters, pca_extents
 from edge_perception.schema import Detection, Label
 
 
@@ -21,35 +21,6 @@ class RockParams:
     hag_min_m: float = 0.2
     hag_max_m: float = 1.8
     min_range_m: float = 8.0  # body +X; drop near-field false positives
-
-
-def _euclidean_clusters(points: np.ndarray, eps: float, min_pts: int) -> List[np.ndarray]:
-    """Greedy BFS Euclidean clustering (small-N edge CPU friendly)."""
-    n = points.shape[0]
-    if n == 0:
-        return []
-    remaining = set(range(n))
-    clusters: List[np.ndarray] = []
-    # brute force ok for downsampled obstacle clouds (~hundreds–low thousands)
-    while remaining:
-        seed = remaining.pop()
-        members = [seed]
-        queue = [seed]
-        while queue:
-            i = queue.pop()
-            pi = points[i]
-            # scan remaining
-            hit = []
-            for j in list(remaining):
-                if np.linalg.norm(points[j] - pi) <= eps:
-                    hit.append(j)
-            for j in hit:
-                remaining.discard(j)
-                members.append(j)
-                queue.append(j)
-        if len(members) >= min_pts:
-            clusters.append(np.asarray(members, dtype=np.int64))
-    return clusters
 
 
 def detect_rocks(
@@ -85,7 +56,7 @@ def detect_rocks(
     if points.shape[0] == 0:
         return []
 
-    clusters = _euclidean_clusters(points, p.cluster_eps_m, p.min_points)
+    clusters = euclidean_clusters(points, p.cluster_eps_m, p.min_points)
     out: List[Detection] = []
     for idx in clusters:
         pts = points[idx]

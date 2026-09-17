@@ -14,12 +14,12 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import String
 
-from edge_perception.bunds import BundParams, bund_points_from_detections, detect_bunds
 from edge_perception.cloud_io import decode_xyz, encode_xyz_label
 from edge_perception.geometry import roi_mask, voxel_downsample
-from edge_perception.schema import AlertEvent, DetectionSet, Label, Severity
+from edge_perception.schema import DetectionSet, Label
+from edge_perception.semantics import SemanticParams, classify_frame
 from edge_sim.topics import SensorBusContract
-from edge_bund_detect.alerting import CooldownGate, matching_detection
+from edge_bund_detect.alerting import CooldownGate
 
 
 class BundDetectNode(Node):
@@ -37,7 +37,7 @@ class BundDetectNode(Node):
         self.vehicle_id = str(self.get_parameter('vehicle_id').value)
         self.cooldown = float(self.get_parameter('alert_cooldown_s').value)
         self._gate = CooldownGate(self.cooldown)
-        self._params = BundParams()
+        self._params = SemanticParams()
         self._frames = 0
         self._alerts = 0
         self._bad_frames = 0
@@ -70,18 +70,33 @@ class BundDetectNode(Node):
         if pts.shape[0] < 20:
             return
 
-        dets, alert_specs = detect_bunds(pts, self._params)
-        bund_pts = bund_points_from_detections(pts, self._params)
-        if bund_pts.shape[0]:
-            labels = np.full((bund_pts.shape[0],), float(Label.BUND), dtype=np.float32)
-            self.pub_cloud.publish(encode_xyz_label(bund_pts, msg.header, labels=labels))
-
         sensor_t = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
         ros_now = float(self.get_clock().now().nanoseconds) * 1e-9
         t_ros = sensor_t if sensor_t > 0.0 else ros_now
         input_frame = msg.header.frame_id or 'base_link'
-        for detection in dets:
-            detection.frame_id = input_frame
+
+        result = classify_frame(
+            pts,
+            params=self._params,
+            t=sensor_t,
+            frame_id=input_frame,
+            vehicle_id=self.vehicle_id,
+            source_node='edge_bund_detect',
+        )
+        # Crest points carry their own class, so an under-height section is
+        # distinguishable from a compliant one on the cloud alone.
+        bund_mask = np.isin(result.labels, [int(Label.BUND), int(Label.BUND_LOW)])
+        if np.any(bund_mask):
+            self.pub_cloud.publish(
+                encode_xyz_label(
+                    pts[bund_mask],
+                    msg.header,
+                    labels=result.labels[bund_mask].astype(np.float32),
+                    conf=result.conf[bund_mask],
+                )
+            )
+
+        dets = [d for d in result.detections if d.type.startswith('bund')]
         dset = DetectionSet(
             t=sensor_t,
             frame_id=input_frame,
@@ -92,25 +107,11 @@ class BundDetectNode(Node):
         s.data = json.dumps(dset.to_dict())
         self.pub_det.publish(s)
 
-        if alert_specs and self._gate.allow(time.monotonic()):
-            for spec in alert_specs:
-                pose = matching_detection(dets, spec.get('side'))
-                pose_valid = pose is not None
-                alert = AlertEvent(
-                    type=str(spec.get('type', 'bund_gap')),
-                    severity=str(spec.get('severity', Severity.WARN)),
-                    confidence=pose.confidence if pose is not None else 0.5,
-                    source_node='edge_bund_detect',
-                    vehicle_id=self.vehicle_id,
-                    frame_id=pose.frame_id if pose is not None else input_frame,
-                    t_ros=t_ros,
-                    t_vehicle=sensor_t,
-                    x=pose.x if pose is not None else 0.0,
-                    y=pose.y if pose is not None else 0.0,
-                    z=pose.z if pose is not None else 0.0,
-                    details={**spec, 'pose_valid': pose_valid},
-                    cloud_ref={'topic': self._bunds_cloud_topic, 'stamp': sensor_t},
-                )
+        events = [e for e in result.events if e.type.startswith('bund')]
+        if events and self._gate.allow(time.monotonic()):
+            for alert in events:
+                alert.t_ros = t_ros
+                alert.cloud_ref = {'topic': self._bunds_cloud_topic, 'stamp': sensor_t}
                 a = String()
                 a.data = json.dumps(alert.to_dict())
                 self.pub_alert.publish(a)

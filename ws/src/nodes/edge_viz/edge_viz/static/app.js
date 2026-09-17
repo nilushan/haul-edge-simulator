@@ -26,19 +26,84 @@ const els = {
   p_fix: document.getElementById('p_fix'),
   p_ll: document.getElementById('p_ll'),
   p_lidar: document.getElementById('p_lidar'),
-  p_detect: document.getElementById('p_detect'),
+  p_road: document.getElementById('p_road'),
   p_vibe: document.getElementById('p_vibe'),
   alertBadge: document.getElementById('alertBadge'),
   alertFeed: document.getElementById('alertFeed'),
+  legend: document.getElementById('legend'),
+  classToggles: document.getElementById('classToggles'),
+  classCounts: document.getElementById('classCounts'),
   togRaw: document.getElementById('togRaw'),
   togMap: document.getElementById('togMap'),
-  togGround: document.getElementById('togGround'),
-  togObstacles: document.getElementById('togObstacles'),
-  togRocks: document.getElementById('togRocks'),
-  togBunds: document.getElementById('togBunds'),
+  togDetectMap: document.getElementById('togDetectMap'),
   togMarkers: document.getElementById('togMarkers'),
+  togLabels: document.getElementById('togLabels'),
   togFullScan: document.getElementById('togFullScan'),
 };
+
+// ——— Semantic class / event styles (served by /api/classes) ———
+const UNKNOWN_RGB = [0.49, 0.53, 0.6];
+const styles = {
+  classes: [],
+  layers: [],
+  events: [],
+  severities: { info: '#4aa3ff', warn: '#e6b450', critical: '#f07178' },
+};
+const classByLabel = new Map(); // point label → class style
+const classByKey = new Map();
+const eventByType = new Map();
+const layerVisible = new Map(); // layer key → shown?
+
+function hexToRgb(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || ''));
+  if (!m) return UNKNOWN_RGB.slice();
+  const v = parseInt(m[1], 16);
+  return [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255];
+}
+
+function classFor(label) {
+  return classByLabel.get(Number(label)) || null;
+}
+
+function eventStyleFor(type) {
+  return eventByType.get(String(type)) || null;
+}
+
+function eventColor(type, severity) {
+  const style = eventStyleFor(type);
+  if (style) return style.color;
+  return styles.severities[severity] || styles.severities.info;
+}
+
+/** Classes outside the driving surface are worth keeping in the world map. */
+function accumulates(layer) {
+  return layer !== 'ground' && layer !== 'unknown';
+}
+
+async function loadStyles() {
+  try {
+    const data = await fetch('/api/classes').then((r) => r.json());
+    styles.classes = data.classes || [];
+    styles.layers = data.layers || [];
+    styles.events = data.events || [];
+    styles.severities = data.severities || styles.severities;
+  } catch (_) {
+    return false; // keep the neutral fallback palette
+  }
+  classByLabel.clear();
+  classByKey.clear();
+  for (const c of styles.classes) {
+    const entry = { ...c, rgb: hexToRgb(c.color) };
+    classByLabel.set(Number(c.label), entry);
+    classByKey.set(c.key, entry);
+  }
+  eventByType.clear();
+  for (const e of styles.events) eventByType.set(e.type, e);
+  for (const layer of styles.layers) {
+    if (!layerVisible.has(layer.key)) layerVisible.set(layer.key, layer.default_on !== false);
+  }
+  return true;
+}
 
 function fmt(n, d = 2) {
   if (n === undefined || n === null || Number.isNaN(n)) return '—';
@@ -292,7 +357,8 @@ const mapCloud = new THREE.Points(
     vertexColors: true,
     sizeAttenuation: true,
     transparent: true,
-    opacity: 0.7,
+    // Kept dim so the classified live scan reads on top of it.
+    opacity: 0.45,
     depthWrite: false,
   }),
 );
@@ -349,19 +415,27 @@ function makeDetectCloud(maxN, size, opacity) {
   return { maxN, positions, colors, geo, pts };
 }
 
+// Bus-mode detector clouds land in these layers; hub mode labels the raw scan
+// in place and leaves them empty.
 const detectLayers = {
   ground: makeDetectCloud(8000, 0.14, 0.45),
-  obstacles: makeDetectCloud(8000, 0.28, 0.9),
-  rocks: makeDetectCloud(6000, 0.32, 0.95),
-  bunds: makeDetectCloud(10000, 0.22, 0.9),
+  obstacle: makeDetectCloud(8000, 0.28, 0.9),
+  rock: makeDetectCloud(6000, 0.32, 0.95),
+  bund: makeDetectCloud(10000, 0.22, 0.9),
 };
 
-const LAYER_RGB = {
-  ground: [0.45, 0.55, 0.42],
-  obstacles: [0.95, 0.35, 1.0],
-  rocks: [1.0, 0.55, 0.08],
-  bunds: [0.15, 0.95, 0.9],
+/** Bus cloud topic name → class key whose colour and toggle it follows. */
+const CLOUD_CLASS = {
+  ground: 'ground',
+  obstacles: 'obstacle',
+  rocks: 'rock',
+  bunds: 'bund',
 };
+
+function layerRgb(classKey) {
+  const entry = classByKey.get(classKey);
+  return entry ? entry.rgb : UNKNOWN_RGB;
+}
 
 // Persistent world obstacle voxels (client-side HAG + detector clouds)
 const OBS_MAP_MAX = 80000;
@@ -391,10 +465,7 @@ scene.add(obsMapCloud);
 const alertMarkers = new THREE.Group();
 scene.add(alertMarkers);
 const alertMarkerById = new Map();
-const detMarkers = new THREE.Group();
-scene.add(detMarkers);
-const detMarkerByKey = new Map();
-const ALERT_MARKER_TTL_MS = 45000;
+const ALERT_MARKER_TTL_MS = 120000;
 
 let lastLidarT = -1;
 let mapCount = 0;
@@ -614,10 +685,6 @@ function bundColor(sideLeft, out, i) {
   }
 }
 
-function rockColor(out, i) {
-  out[i] = 1.0; out[i + 1] = 0.45; out[i + 2] = 0.05;
-}
-
 function pruneMapFarFrom(egoThree, maxKeep = MAP_MAX) {
   const r2 = MAP_KEEP_RADIUS_M * MAP_KEEP_RADIUS_M;
   // First drop anything beyond keep radius
@@ -820,7 +887,7 @@ function updateTruck(odom) {
 }
 
 function updateLidar(lidar, odom) {
-  if (!lidar?.xy?.length || !odom) return;
+  if (!lidar?.xy?.length || !odom) return null;
 
   // Display mesh can lag slightly; clouds always use raw odom.
   updateTruck(odom);
@@ -828,77 +895,97 @@ function updateLidar(lidar, odom) {
   // 1) Append this scan into the persistent world map
   if (mapCloud.visible) appendLidarToMap(lidar, odom);
 
-  // 2) Dense current scan + live class colors (bund always, rocks ahead)
-  const hag = estimateScanHag(lidar, 0.75);
+  // 2) Current scan, coloured by class when the perception pass labelled it.
+  const count = lidar.xy.length;
+  const labels = Array.isArray(lidar.label) && lidar.label.length === count ? lidar.label : null;
+  const confs = Array.isArray(lidar.conf) && lidar.conf.length === count ? lidar.conf : null;
+  const hag = labels ? null : estimateScanHag(lidar, 0.75);
   const full = !els.togFullScan || els.togFullScan.checked;
-  const showObs = !els.togObstacles || els.togObstacles.checked;
-  const showBund = !els.togBunds || els.togBunds.checked;
-  const showRock = !els.togRocks || els.togRocks.checked;
-  const n = Math.min(lidar.xy.length, scanMax);
+  const showBund = layerVisible.get('bund') !== false;
+  const showObs = layerVisible.get('obstacle') !== false;
+  const n = Math.min(count, scanMax);
   const col = [0, 0, 0];
+  const counts = {};
+  const liveBund = []; // unlabelled fallback only — shoulders from raw geometry
   let w = 0;
-  let obsLive = 0;
-  let bundLive = 0;
-  let rockLive = 0;
   let obsMapDirty = false;
 
-  // Bund shoulders are vehicle-relative (always along road). Do NOT invent
-  // client-side "rocks" — those sit fixed in body frame and slide with the truck.
-  const liveBund = [];
+  if (!scanCloud.visible) {
+    scanGeo.setDrawRange(0, 0);
+    return { scan: 0, counts, labelled: !!labels };
+  }
 
-  if (scanCloud.visible) {
-    for (let i = 0; i < n; i++) {
-      const bx = lidar.xy[i][0];
-      const by = lidar.xy[i][1];
-      const bz = (lidar.z && lidar.z[i]) || 0;
-      if (!full && !(bx > 0.5)) continue;
-      // Ignore near-field returns (cab / hood / bumper) — common false "rocks"
-      if (bx < 3.5 && Math.abs(by) < 2.5) continue;
-      bodyToWorld(bx, by, bz, odom, _world);
-      const j = w * 3;
-      scanPositions[j] = _world.x;
-      scanPositions[j + 1] = _world.y;
-      scanPositions[j + 2] = _world.z;
+  for (let i = 0; i < n; i++) {
+    const bx = lidar.xy[i][0];
+    const by = lidar.xy[i][1];
+    const bz = (lidar.z && lidar.z[i]) || 0;
+    if (!full && !(bx > 0.5)) continue;
+    // Ignore near-field returns (cab / hood / bumper) — common false "rocks"
+    if (bx < 3.5 && Math.abs(by) < 2.5) continue;
 
+    const cls = labels ? classFor(labels[i]) : null;
+    if (labels) {
+      const layer = cls ? cls.layer : 'unknown';
+      if (layerVisible.get(layer) === false) continue;
+      const key = cls ? cls.key : 'unknown';
+      counts[key] = (counts[key] || 0) + 1;
+    }
+
+    bodyToWorld(bx, by, bz, odom, _world);
+    const j = w * 3;
+    scanPositions[j] = _world.x;
+    scanPositions[j + 1] = _world.y;
+    scanPositions[j + 2] = _world.z;
+
+    if (labels) {
+      const rgb = cls ? cls.rgb : UNKNOWN_RGB;
+      const c = confs ? Math.max(0.45, Math.min(1, confs[i])) : 1;
+      const shade = 0.55 + 0.45 * c;
+      col[0] = rgb[0] * shade;
+      col[1] = rgb[1] * shade;
+      col[2] = rgb[2] * shade;
+      // World-fixed detection map keeps everything that is not driving surface.
+      if (cls && accumulates(cls.layer) && bx >= 6.0) {
+        appendObstacleWorld(_world.x, _world.y, _world.z, col);
+        obsMapDirty = true;
+      }
+    } else {
+      // No labels on this source (raw bus scan): keep the geometric heuristic.
       const h = hag[i];
       const bund = isBundBand(bx, by);
       const elevated = Number.isFinite(h) && h > 0.28 && bx >= 5.0;
-
       if (bund) {
         bundColor(by > 0, col, 0);
-        bundLive += 1;
+        counts.bund = (counts.bund || 0) + 1;
         if (showBund) liveBund.push(_world.x, _world.y, _world.z);
       } else if (elevated && showObs) {
-        // subtle obstacle tint only — no rock markers from client HAG
         obstacleColor(h, col, 0);
-        obsLive += 1;
-        // only accumulate far elevated cells into world map (world-fixed)
+        counts.obstacle = (counts.obstacle || 0) + 1;
         if (bx >= 8.0) {
-          appendObstacleWorld(_world.x, _world.y, _world.z, [col[0], col[1], col[2]]);
+          appendObstacleWorld(_world.x, _world.y, _world.z, col);
           obsMapDirty = true;
         }
       } else {
         scanHeightColor(bz, col, 0);
       }
-      scanColors[j] = col[0];
-      scanColors[j + 1] = col[1];
-      scanColors[j + 2] = col[2];
-      w += 1;
     }
-    scanGeo.setDrawRange(0, w);
-    scanGeo.attributes.position.needsUpdate = true;
-    scanGeo.attributes.color.needsUpdate = true;
-  } else {
-    scanGeo.setDrawRange(0, 0);
+
+    scanColors[j] = col[0];
+    scanColors[j + 1] = col[1];
+    scanColors[j + 2] = col[2];
+    w += 1;
   }
 
-  // Bunds always from live scan (shoulders). Rocks only from detector path later.
-  fillWorldLayer(detectLayers.bunds, liveBund, LAYER_RGB.bunds, showBund);
-  if (!showRock) detectLayers.rocks.geo.setDrawRange(0, 0);
-  if (!showObs) detectLayers.obstacles.geo.setDrawRange(0, 0);
+  scanGeo.setDrawRange(0, w);
+  scanGeo.attributes.position.needsUpdate = true;
+  scanGeo.attributes.color.needsUpdate = true;
 
+  if (!labels) {
+    // Bunds from the live scan keep the unlabelled view usable.
+    fillWorldLayer(detectLayers.bund, liveBund, layerRgb('bund'), showBund);
+  }
   if (obsMapDirty) rebuildObsMapGeometry();
-  return { scan: w, obstacles: obsLive, bunds: bundLive, rocks: rockLive };
+  return { scan: w, counts, labelled: !!labels };
 }
 
 function fillWorldLayer(layer, xyzFlat, rgb, visible) {
@@ -966,35 +1053,76 @@ function fillDetectLayer(layer, cloud, rgb, odom, { forwardOnly = false, minX = 
   return w;
 }
 
-function updateDetectClouds(detect, odom) {
-  if (!odom) return { rocks: 0, bunds: 0, obstacles: 0, ground: 0 };
-  const clouds = detect?.clouds || {};
-  // Detector rock/obstacle clouds: only beyond near-field so body-locked ghosts drop out.
-  const rocks = fillDetectLayer(detectLayers.rocks, clouds.rocks, LAYER_RGB.rocks, odom, {
-    forwardOnly: true,
-    minX: 8.0,
-  });
-  // Live bunds already drawn from scan; detector bunds optional overlay
-  const bunds = fillDetectLayer(detectLayers.bunds, clouds.bunds, LAYER_RGB.bunds, odom, {
-    minX: 2.0,
-    keepPreviousIfEmpty: true, // bunds are primarily drawn from the live scan
-  });
-  const obstacles = fillDetectLayer(
-    detectLayers.obstacles,
-    clouds.obstacles,
-    LAYER_RGB.obstacles,
-    odom,
-    { forwardOnly: true, minX: 8.0 },
-  );
-  const ground = fillDetectLayer(detectLayers.ground, clouds.ground, LAYER_RGB.ground, odom, {
-    minX: 3.0,
-  });
+/** Split one labelled cloud across the class layers it covers. */
+function fillSemanticCloud(cloud, odom) {
+  const counts = {};
+  const buckets = new Map(); // class key → flat world xyz
+  const labels = cloud.label || [];
+  const n = Math.min(cloud.xy.length, 20000);
+  for (let i = 0; i < n; i++) {
+    const cls = classFor(labels[i]);
+    const key = cls ? cls.key : 'unknown';
+    counts[key] = (counts[key] || 0) + 1;
+    const layer = cls ? cls.layer : 'unknown';
+    if (layerVisible.get(layer) === false) continue;
+    const bx = cloud.xy[i][0];
+    const by = cloud.xy[i][1];
+    const bz = (cloud.z && cloud.z[i]) || 0;
+    bodyToWorld(bx, by, bz, odom, _world);
+    let bucket = buckets.get(key);
+    if (!bucket) {
+      bucket = [];
+      buckets.set(key, bucket);
+    }
+    bucket.push(_world.x, _world.y, _world.z);
+    if (cls && accumulates(cls.layer) && isForward(bx, 8.0)) {
+      appendObstacleWorld(_world.x, _world.y, _world.z, cls.rgb);
+    }
+  }
+  for (const [layerKey, layer] of Object.entries(detectLayers)) {
+    const classKeys = styles.classes.filter((c) => c.layer === layerKey).map((c) => c.key);
+    const flat = [];
+    for (const key of classKeys) {
+      const bucket = buckets.get(key);
+      // Push in a loop: spreading a multi-thousand point bucket overflows.
+      if (bucket) for (const v of bucket) flat.push(v);
+    }
+    fillWorldLayer(layer, flat, layerRgb(classKeys[0] || layerKey), layerVisible.get(layerKey) !== false);
+  }
+  rebuildObsMapGeometry();
+  return counts;
+}
 
-  // World-fixed obstacle map from far detections only
-  for (const kind of ['obstacles', 'rocks']) {
+function updateDetectClouds(detect, odom) {
+  const counts = {};
+  if (!odom) return counts;
+  const clouds = detect?.clouds || {};
+  // A labelled full frame supersedes the per-class clouds: drawing both would
+  // paint the same returns twice.
+  if (clouds.semantic?.xy?.length) return fillSemanticCloud(clouds.semantic, odom);
+
+  for (const [kind, classKey] of Object.entries(CLOUD_CLASS)) {
+    const layer = detectLayers[classKey];
+    if (!layer) continue;
+    // Detector rock/obstacle clouds only past the near field, so body-locked
+    // ghosts in front of the cab drop out instead of sliding with the truck.
+    const near = classKey === 'rock' || classKey === 'obstacle';
+    counts[classKey] = fillDetectLayer(layer, clouds[kind], layerRgb(classKey), odom, {
+      forwardOnly: near,
+      minX: near ? 8.0 : 2.0,
+      // Bunds are also drawn from the live scan, so an empty frame is not
+      // evidence that the previous shoulder points are gone.
+      keepPreviousIfEmpty: classKey === 'bund',
+    });
+  }
+
+  // World-fixed detection map from the far part of the detector clouds.
+  let dirty = false;
+  for (const [kind, classKey] of Object.entries(CLOUD_CLASS)) {
+    if (!accumulates(classKey)) continue;
     const cloud = clouds[kind];
     if (!cloud?.xy?.length) continue;
-    const rgb = LAYER_RGB[kind];
+    const rgb = layerRgb(classKey);
     const n = Math.min(cloud.xy.length, 4000);
     for (let i = 0; i < n; i++) {
       const bx = cloud.xy[i][0];
@@ -1003,77 +1131,161 @@ function updateDetectClouds(detect, odom) {
       if (!isForward(bx, 8.0)) continue;
       bodyToWorld(bx, by, bz, odom, _world);
       appendObstacleWorld(_world.x, _world.y, _world.z, rgb);
+      dirty = true;
     }
   }
-  rebuildObsMapGeometry();
-  return { ground, obstacles, rocks, bunds };
+  if (dirty) rebuildObsMapGeometry();
+  return counts;
 }
 
 function updateDetectionMarkers(_detections) {
-  // Sphere markers for per-frame body-frame detections are disabled.
-  // Re-projecting body (x,y,z) every tick made false rocks sit fixed in front
-  // of the truck and slide with it. Rocks/obstacles use point clouds only;
-  // alert markers below are frozen in world on first sighting.
-  for (const m of detMarkerByKey.values()) m.visible = false;
+  // Per-frame body-frame detections get no sphere of their own: re-projecting
+  // them every tick made false rocks sit in front of the truck and slide with
+  // it. Classes ride on the scan colours; events below freeze in the world.
 }
 
 function severityColor(sev) {
-  if (sev === 'critical') return 0xf07178;
-  if (sev === 'warn') return 0xe6b450;
-  return 0x4aa3ff;
+  return new THREE.Color(styles.severities[sev] || styles.severities.info).getHex();
+}
+
+const LABEL_HEIGHT_M = 1.7;
+const LABEL_STALK_M = 3.4;
+
+/** Billboard text tag drawn above an event marker. */
+function makeLabelSprite(text, color, severity) {
+  const dpr = 2;
+  const pad = 14 * dpr;
+  const fontPx = 22 * dpr;
+  const font = `600 ${fontPx}px "IBM Plex Sans", "Segoe UI", system-ui, sans-serif`;
+  const canvas = document.createElement('canvas');
+  const measure = canvas.getContext('2d');
+  measure.font = font;
+  const textWidth = measure.measureText(text).width;
+  canvas.width = Math.ceil(textWidth + pad * 2 + 10 * dpr);
+  canvas.height = Math.ceil(fontPx + pad * 1.4);
+
+  const ctx = canvas.getContext('2d');
+  ctx.font = font;
+  ctx.textBaseline = 'middle';
+  const radius = canvas.height / 2;
+  ctx.beginPath();
+  ctx.moveTo(radius, 0);
+  ctx.lineTo(canvas.width - radius, 0);
+  ctx.arcTo(canvas.width, 0, canvas.width, radius, radius);
+  ctx.arcTo(canvas.width, canvas.height, canvas.width - radius, canvas.height, radius);
+  ctx.lineTo(radius, canvas.height);
+  ctx.arcTo(0, canvas.height, 0, radius, radius);
+  ctx.arcTo(0, 0, radius, 0, radius);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(8, 13, 20, 0.86)';
+  ctx.fill();
+  ctx.lineWidth = 2.5 * dpr;
+  ctx.strokeStyle = styles.severities[severity] || color;
+  ctx.stroke();
+
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(pad, canvas.height / 2, 5 * dpr, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#e8eef6';
+  ctx.fillText(text, pad + 12 * dpr, canvas.height / 2 + dpr);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.anisotropy = 4;
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false, depthWrite: false }),
+  );
+  sprite.scale.set((LABEL_HEIGHT_M * canvas.width) / canvas.height, LABEL_HEIGHT_M, 1);
+  sprite.renderOrder = 10;
+  return sprite;
+}
+
+/** Deterministic 0/1/2 rung so tags on clustered events do not overlap. */
+function labelRung(id) {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) % 997;
+  return hash % 3;
+}
+
+function makeEventMarker(alert, id) {
+  const type = String(alert.type || 'event');
+  const style = eventStyleFor(type);
+  const colorHex = eventColor(type, alert.severity);
+  const color = new THREE.Color(colorHex);
+  const group = new THREE.Group();
+
+  const radius = Math.min(1.6, Math.max(0.4, Number(alert.geometry?.radius_m) || 0.6));
+  const shape =
+    type === 'rock'
+      ? new THREE.SphereGeometry(radius, 14, 10)
+      : new THREE.OctahedronGeometry(Math.max(radius, 0.9));
+  const mesh = new THREE.Mesh(
+    shape,
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.45, depthWrite: false }),
+  );
+  mesh.renderOrder = 4;
+  group.add(mesh);
+
+  const stalkGeo = new THREE.BufferGeometry();
+  stalkGeo.setAttribute(
+    'position',
+    new THREE.BufferAttribute(new Float32Array([0, 0, 0, 0, LABEL_STALK_M, 0]), 3),
+  );
+  group.add(
+    new THREE.Line(
+      stalkGeo,
+      new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.75, depthTest: false }),
+    ),
+  );
+
+  const text = String(alert.label || (style ? style.short : type)).slice(0, 44);
+  const sprite = makeLabelSprite(text, colorHex, alert.severity);
+  const stalk = LABEL_STALK_M + labelRung(id) * LABEL_HEIGHT_M * 1.15;
+  stalkGeo.attributes.position.setY(1, stalk);
+  sprite.position.set(0, stalk + LABEL_HEIGHT_M * 0.65, 0);
+  sprite.visible = !els.togLabels || els.togLabels.checked;
+  group.add(sprite);
+  group.userData.sprite = sprite;
+  return group;
+}
+
+function disposeMarker(group) {
+  group.traverse((child) => {
+    if (child.geometry) child.geometry.dispose();
+    if (child.material) {
+      if (child.material.map) child.material.map.dispose();
+      child.material.dispose();
+    }
+  });
 }
 
 function upsertAlertMarker(alert) {
-  if (!alertMarkers.visible) return;
-  // Skip rock/obstacle spheres entirely unless range is clearly ahead and real-sized.
-  // Body-frame rocks re-emitted every frame become "ghost rocks" that follow the truck.
-  if (alert.type === 'rock' || alert.type === 'obstacle') {
-    const pose = alert.pose || {};
-    const range = Number(alert.details?.range_m ?? pose.x ?? 0);
-    const radius = Number(alert.geometry?.radius_m ?? 0);
-    if (range < 8.0 || radius < 0.25) return;
-  }
-  // Vibration / bund alerts: badge feed only (no sticky sphere in front of cab)
-  if (alert.type === 'excessive_vibration' || String(alert.type || '').startsWith('bund')) {
-    return;
-  }
-
   const id = alert.event_id || `${alert.type}-${alert.t_ros || alert.t_vehicle}`;
-  let entry = alertMarkerById.get(id);
-  if (entry) {
-    // Keep frozen world pose — do not re-anchor from body each tick
-    entry.t0 = performance.now();
+  const existing = alertMarkerById.get(id);
+  if (existing) {
+    // Keep the frozen world pose — never re-anchor from body each tick.
+    existing.t0 = performance.now();
     return;
   }
 
   const pose = alert.pose || {};
   const frame = alert.frame_id || 'map';
-  let threePos;
+  let position;
   if (frame === 'base_link' || frame === 'lidar_link') {
-    if (!lastOdom) return;
-    if (!isForward(pose.x || 0, 8.0)) return;
+    // Body-frame events (bus mode) are only trustworthy well ahead of the cab.
+    if (!lastOdom || !isForward(pose.x || 0, 8.0)) return;
     bodyToWorld(pose.x || 0, pose.y || 0, pose.z || 0, lastOdom, _world);
-    threePos = _world.clone();
+    position = _world.clone();
   } else {
     if (pose.x == null && pose.y == null) return;
-    threePos = enuToThree(pose.x || 0, pose.y || 0, pose.z || 0);
-    threePos.y += 0.4;
+    position = enuToThree(pose.x || 0, pose.y || 0, pose.z || 0);
+    position.y += 0.4;
   }
 
-  const r = Math.min(0.7, Math.max(0.25, Number(alert.geometry?.radius_m) || 0.4));
-  const mesh = new THREE.Mesh(
-    new THREE.SphereGeometry(r, 10, 8),
-    new THREE.MeshBasicMaterial({
-      color: severityColor(alert.severity),
-      transparent: true,
-      opacity: 0.4,
-      depthWrite: false,
-    }),
-  );
-  mesh.renderOrder = 4;
-  mesh.position.copy(threePos);
-  alertMarkers.add(mesh);
-  alertMarkerById.set(id, { mesh, t0: performance.now() });
+  const group = makeEventMarker(alert, id);
+  group.position.copy(position);
+  alertMarkers.add(group);
+  alertMarkerById.set(id, { mesh: group, t0: performance.now() });
 }
 
 function pruneAlertMarkers() {
@@ -1081,23 +1293,55 @@ function pruneAlertMarkers() {
   for (const [id, entry] of [...alertMarkerById.entries()]) {
     if (now - entry.t0 > ALERT_MARKER_TTL_MS) {
       alertMarkers.remove(entry.mesh);
-      entry.mesh.geometry.dispose();
-      entry.mesh.material.dispose();
+      disposeMarker(entry.mesh);
       alertMarkerById.delete(id);
     }
   }
+}
+
+function applyLabelVisibility() {
+  const show = !els.togLabels || els.togLabels.checked;
+  for (const entry of alertMarkerById.values()) {
+    const sprite = entry.mesh.userData?.sprite;
+    if (sprite) sprite.visible = show;
+  }
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+function alertBody(a) {
+  const det = a.details || {};
+  if (a.type === 'rock') {
+    return `Ø ${fmt(2 * (a.geometry?.radius_m ?? 0), 2)} m · range ${fmt(det.range_m, 1)} m · `
+      + `${det.in_lane ? 'in lane' : 'off lane'} · conf ${fmt(a.confidence, 2)}`;
+  }
+  if (a.type === 'bund_low') {
+    return `${det.side || ''} · ${fmt(det.min_height_m, 2)} m vs ${fmt(det.spec_height_m, 2)} m spec`
+      + ` · short by ${fmt(det.deficit_m, 2)} m over ${fmt(det.length_m, 0)} m`;
+  }
+  if (a.type === 'bund_gap') {
+    return `${det.side || ''} · no crest over ${fmt(det.length_m, 0)} m`;
+  }
+  if (a.type === 'excessive_vibration') {
+    return `RMS az ${fmt(det.rms_az, 2)} · peak ${fmt(det.peak_az, 2)} · v ${fmt(det.speed_mps, 1)} m/s`;
+  }
+  return escapeHtml(JSON.stringify(det).slice(0, 80));
 }
 
 function renderAlertFeed(alerts) {
   if (!els.alertFeed) return;
   const list = Array.isArray(alerts) ? alerts : [];
   if (els.alertBadge) {
-    els.alertBadge.textContent = `alerts ${list.length}`;
+    els.alertBadge.textContent = `events ${list.length}`;
     const hot = list.some((a) => a.severity === 'critical' || a.severity === 'warn');
     els.alertBadge.className = hot ? 'badge alert-hot' : 'badge';
   }
   if (!list.length) {
-    els.alertFeed.innerHTML = '<div class="alert-empty">No alerts yet</div>';
+    els.alertFeed.innerHTML = '<div class="alert-empty">No events yet</div>';
     return;
   }
   els.alertFeed.innerHTML = list
@@ -1105,35 +1349,84 @@ function renderAlertFeed(alerts) {
     .map((a) => {
       const sev = a.severity || 'info';
       const t = a.t_vehicle ?? a.t_ros ?? 0;
-      const det = a.details || {};
-      let body = '';
-      if (a.type === 'rock') {
-        body = `r=${fmt(a.geometry?.radius_m, 2)} m · range ${fmt(det.range_m, 1)} m · conf ${fmt(a.confidence, 2)}`;
-      } else if (a.type === 'excessive_vibration') {
-        body = `RMS az ${fmt(det.rms_az, 2)} · peak ${fmt(det.peak_az, 2)} · v ${fmt(det.speed_mps, 1)} m/s`;
-      } else if (String(a.type || '').startsWith('bund')) {
-        body = `${det.side || ''} ${det.reason || det.type || ''} gap ${fmt(det.max_gap_m, 1)} m`.trim();
-      } else {
-        body = JSON.stringify(det).slice(0, 80);
-      }
-      return `<div class="alert-item ${sev}"><div class="ah"><span class="atype">${a.type || 'event'}</span><span class="asev">${sev} · t=${fmt(t, 1)}s</span></div><div class="abody">${body}</div></div>`;
+      const style = eventStyleFor(a.type);
+      const title = escapeHtml(style ? style.title : a.type || 'event');
+      const swatch = `<span class="swatch" style="background:${eventColor(a.type, sev)}"></span>`;
+      return `<div class="alert-item ${escapeHtml(sev)}" title="${escapeHtml(a.label || title)}">`
+        + `<div class="ah"><span class="atype">${swatch}${title}</span>`
+        + `<span class="asev">${escapeHtml(sev)} · t=${fmt(t, 1)}s</span></div>`
+        + `<div class="abody">${alertBody(a)}</div></div>`;
     })
     .join('');
+}
+
+function renderClassCounts(counts) {
+  if (!els.classCounts) return;
+  els.classCounts.innerHTML = styles.classes
+    .map((c) => {
+      const hidden = layerVisible.get(c.layer) === false;
+      const n = hidden ? 'hidden' : Number(counts?.[c.key] || 0);
+      return `<span class="class-chip${hidden ? ' off' : ''}" title="${escapeHtml(c.description || '')}">`
+        + `<span class="swatch" style="background:${c.color}"></span>${escapeHtml(c.title)} <b>${n}</b></span>`;
+    })
+    .join('');
+}
+
+function buildClassToggles() {
+  if (!els.classToggles) return;
+  els.classToggles.innerHTML = '';
+  for (const layer of styles.layers) {
+    const label = document.createElement('label');
+    label.className = 'tog';
+    label.title = styles.classes
+      .filter((c) => c.layer === layer.key)
+      .map((c) => c.title)
+      .join(' · ');
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = layerVisible.get(layer.key) !== false;
+    input.addEventListener('change', () => {
+      layerVisible.set(layer.key, input.checked);
+      applyLayerToggles();
+    });
+    const swatch = document.createElement('span');
+    const first = styles.classes.find((c) => c.layer === layer.key);
+    swatch.className = 'swatch';
+    swatch.style.background = first ? first.color : '#7d8899';
+    label.append(input, swatch, document.createTextNode(` ${layer.title}`));
+    els.classToggles.appendChild(label);
+  }
+}
+
+function buildLegend() {
+  if (!els.legend) return;
+  const items = [
+    ...styles.classes.map(
+      (c) => `<span class="legend-item" title="${escapeHtml(c.description || '')}">`
+        + `<span class="swatch" style="background:${c.color}"></span>${escapeHtml(c.title)}</span>`,
+    ),
+    ...styles.events.map(
+      (e) => `<span class="legend-item event" title="${escapeHtml(e.description || '')}">`
+        + `<span class="swatch" style="background:${e.color}"></span>${escapeHtml(e.short)}</span>`,
+    ),
+    '<span class="legend-item"><span class="swatch map-old"></span>prior map</span>',
+    '<span class="legend-item"><span class="swatch truck"></span>truck</span>',
+  ];
+  els.legend.innerHTML = items.join('');
 }
 
 function applyLayerToggles() {
   scanCloud.visible = !els.togRaw || els.togRaw.checked;
   mapCloud.visible = !els.togMap || els.togMap.checked;
-  detectLayers.ground.pts.visible = !!(els.togGround && els.togGround.checked);
-  detectLayers.obstacles.pts.visible = !!(els.togObstacles && els.togObstacles.checked);
-  detectLayers.rocks.pts.visible = !els.togRocks || els.togRocks.checked;
-  detectLayers.bunds.pts.visible = !els.togBunds || els.togBunds.checked;
+  for (const [key, layer] of Object.entries(detectLayers)) {
+    layer.pts.visible = layerVisible.get(key) !== false;
+  }
   alertMarkers.visible = !els.togMarkers || els.togMarkers.checked;
-  detMarkers.visible = !els.togMarkers || els.togMarkers.checked;
-  obsMapCloud.visible = !!(els.togObstacles && els.togObstacles.checked);
+  obsMapCloud.visible = !els.togDetectMap || els.togDetectMap.checked;
+  applyLabelVisibility();
 }
 
-for (const key of ['togRaw', 'togMap', 'togGround', 'togObstacles', 'togRocks', 'togBunds', 'togMarkers', 'togFullScan']) {
+for (const key of ['togRaw', 'togMap', 'togDetectMap', 'togMarkers', 'togLabels', 'togFullScan']) {
   const el = els[key];
   if (el) el.addEventListener('change', applyLayerToggles);
 }
@@ -1226,6 +1519,11 @@ function applyPhysics(msg) {
   els.p_lidar.textContent =
     scanN != null ? `scan ${scanN} · map ${mapCount.toLocaleString()} vox` : `map ${mapCount.toLocaleString()} vox`;
 
+  const roadHw = msg.detect?.road_half_width_m;
+  if (els.p_road) {
+    els.p_road.textContent = roadHw ? `${fmt(roadHw, 2)} m` : '—';
+  }
+
   const vibe = msg.detect?.vibe;
   if (els.p_vibe) {
     els.p_vibe.textContent = vibe
@@ -1271,23 +1569,28 @@ function applyTick(msg) {
   applyPhysics(msg);
   applyCharts(msg);
   // LiDAR path updates truck pose then map/scan (avoid double pose jump)
-  let live = { obstacles: 0, bunds: 0, rocks: 0, scan: 0 };
+  let live = null;
   if (msg.lidar && msg.odom) {
-    live = updateLidar(msg.lidar, msg.odom) || live;
+    live = updateLidar(msg.lidar, msg.odom);
   } else if (msg.odom) {
     updateTruck(msg.odom);
   }
 
-  const counts = updateDetectClouds(msg.detect, msg.odom || lastOdom);
+  // Bus-mode detector clouds, if any, land in the same class layers.
+  const busCounts = updateDetectClouds(msg.detect, msg.odom || lastOdom);
   updateDetectionMarkers(msg.detect?.detections);
-  if (els.p_detect) {
-    els.p_detect.textContent =
-      `scan ${live.scan || 0} · rock ${live.rocks || 0}/${counts.rocks} · bund ${live.bunds || 0}/${counts.bunds} · obs ${live.obstacles || 0}`;
-  }
+  // Prefer the classified scan; fall back to the detector clouds, then to the
+  // per-class totals the server reported for this frame.
+  const counts = live?.labelled
+    ? live.counts
+    : { ...(msg.detect?.counts || {}), ...busCounts, ...(live?.counts || {}) };
+  renderClassCounts(counts);
 
   const alerts = msg.detect?.alerts || [];
   renderAlertFeed(alerts);
-  for (const a of alerts) upsertAlertMarker(a);
+  if (alertMarkers.visible) {
+    for (const a of alerts) upsertAlertMarker(a);
+  }
   pruneAlertMarkers();
 }
 
@@ -1314,7 +1617,10 @@ function connectWs() {
     try {
       const msg = JSON.parse(ev.data);
       applyTickFull(msg);
-    } catch (_) { /* ignore */ }
+    } catch (err) {
+      // Swallowing this silently once hid a render bug behind a frozen clock.
+      console.error('tick render failed', err);
+    }
   };
 }
 
@@ -1348,6 +1654,10 @@ async function loadCatalog() {
 }
 
 async function bootstrap() {
+  await loadStyles();
+  buildClassToggles();
+  buildLegend();
+  applyLayerToggles();
   await loadCatalog();
   try {
     const st = await fetch('/api/status').then((r) => r.json());
@@ -1364,7 +1674,7 @@ async function bootstrap() {
       imu_tail: st.history?.imu || [],
       odom_tail: st.history?.odom || [],
       gnss_tail: st.history?.gnss || [],
-      detect: st.detect || { clouds: {}, detections: null, alerts: [], vibe: null },
+      detect: st.detect || { clouds: {}, detections: null, alerts: [], vibe: null, counts: {} },
     });
   } catch (_) { /* starting */ }
   connectWs();

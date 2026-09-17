@@ -15,11 +15,13 @@ ws/src/
 │   │       └── tools/
 │   └── edge_perception/          # detection algorithms + schemas
 │       └── edge_perception/
-│           ├── schema.py         # Detection / AlertEvent
+│           ├── schema.py         # Detection / AlertEvent + class & event styles
+│           ├── semantics.py      # whole-frame classifier (classes + events)
 │           ├── geometry.py
 │           ├── ground.py
 │           ├── rocks.py
 │           ├── bunds.py
+│           ├── tracking.py       # pose transform + spatial event dedup
 │           ├── vibration.py
 │           └── cloud_io.py
 │
@@ -57,12 +59,12 @@ Rules:
 
 ```text
 DEV
-  edge_sim.StreamHub ──► edge_viz.run_from_hub ──► browser
+  edge_sim.StreamHub ──► PerceptionOverlay (same classifier) ──► edge_viz ──► browser
 
 EDGE
   edge_sensor_source ──publish──► ROS bus (/imu /gnss /lidar /odom)
         │
-        ├─► edge_rock_detect  ──► /edge/lidar/rocks  /edge/detections /edge/alerts
+        ├─► edge_rock_detect  ──► /edge/lidar/semantic /edge/lidar/rocks /edge/alerts
         ├─► edge_bund_detect  ──► /edge/lidar/bunds  /edge/detections /edge/alerts
         ├─► edge_vibe_detect  ──► /edge/vibe/features /edge/alerts
         ├─► edge_event_store  ──► SQLite (local edge storage)

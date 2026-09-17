@@ -15,6 +15,21 @@ class Rock:
     r: float
 
 
+@dataclass
+class BundDefect:
+    """A stretch of shoulder where the berm is under-built or absent."""
+
+    side: float  # -1.0 right of centreline, +1.0 left
+    s_start: float  # route station [m]
+    length_m: float
+    height_scale: float  # 0.0 = no berm at all
+    ramp_m: float = 3.0
+
+    @property
+    def kind(self) -> str:
+        return 'gap' if self.height_scale <= 0.05 else 'low'
+
+
 @dataclass(frozen=True)
 class PathProfile:
     """Parametric corridor shape (used by map presets)."""
@@ -46,6 +61,7 @@ class HaulWorld:
     - Bunds/berms along both shoulders
     - Climbs / drops along station
     - Rocks on/near the road
+    - Optional bund defects (low or missing berm sections)
     """
 
     def __init__(
@@ -57,6 +73,7 @@ class HaulWorld:
         n_rocks: int = 48,
         rock_radius: Tuple[float, float] = (0.3, 1.15),
         path: PathProfile | None = None,
+        n_bund_defects: int = 4,
     ) -> None:
         self.road_hw = float(road_half_width_m)
         self.berm_h = float(berm_height_m)
@@ -84,6 +101,22 @@ class HaulWorld:
             )
         self._rock_xy = np.array([[r.x, r.y] for r in self.rocks], dtype=np.float64) if self.rocks else np.zeros((0, 2))
         self._rock_r = np.array([r.r for r in self.rocks], dtype=np.float64) if self.rocks else np.zeros((0,))
+
+        # Bund defects give the edge detectors something real to find: without
+        # them every berm in the world is compliant by construction.
+        self.bund_defects: List[BundDefect] = []
+        for i in range(max(int(n_bund_defects), 0)):
+            # Alternate sides and mix in a full gap every third defect so every
+            # map exercises both findings rather than leaving it to chance.
+            gap = i % 3 == 2
+            self.bund_defects.append(
+                BundDefect(
+                    side=1.0 if i % 2 == 0 else -1.0,
+                    s_start=90.0 + i * 130.0 + float(self._rng.uniform(-25.0, 25.0)),
+                    length_m=float(self._rng.uniform(14.0, 34.0)),
+                    height_scale=0.0 if gap else float(self._rng.uniform(0.22, 0.52)),
+                )
+            )
 
     def _xy_at(self, s_arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         y = np.zeros_like(s_arr, dtype=float)
@@ -114,6 +147,19 @@ class HaulWorld:
         if np.isscalar(s):
             return float(z)
         return z
+
+    def _berm_scale(self, s_arr: np.ndarray, side: float) -> np.ndarray:
+        """Per-station berm height multiplier for one side (1.0 = as designed)."""
+        scale = np.ones_like(np.asarray(s_arr, dtype=float))
+        for defect in self.bund_defects:
+            if defect.side != side:
+                continue
+            ramp = max(float(defect.ramp_m), 1e-3)
+            rise = self._smoothstep((s_arr - defect.s_start) / ramp)
+            fall = self._smoothstep((defect.s_start + defect.length_m - s_arr) / ramp)
+            inside = np.clip(np.minimum(rise, fall), 0.0, 1.0)
+            scale = np.minimum(scale, 1.0 - inside * (1.0 - defect.height_scale))
+        return scale
 
     @staticmethod
     def _smoothstep(t: np.ndarray | float) -> np.ndarray | float:
@@ -151,12 +197,13 @@ class HaulWorld:
             z - 0.12 * np.minimum(np.abs(lat) - self.road_hw, 2.5),
         )
 
-        # bunds both sides
+        # bunds both sides, scaled down (or removed) across defect stations
         for side in (-1.0, 1.0):
             c = side * (self.road_hw + 0.45 * self.berm_w)
             d = np.abs(lat - c)
-            bund = z_grade + self.berm_h * (1.0 - d / self.berm_w)
-            z = np.where(d < self.berm_w, np.maximum(z, bund), z)
+            scale = self._berm_scale(s, side)
+            bund = z_grade + self.berm_h * scale * (1.0 - d / self.berm_w)
+            z = np.where((d < self.berm_w) & (scale > 0.02), np.maximum(z, bund), z)
 
         # off-road roughness
         off = np.abs(lat) > self.road_hw + self.berm_w

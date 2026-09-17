@@ -43,6 +43,8 @@ class TickBuffer:
         self._last_lidar: Optional[Dict[str, Any]] = None
         self._last_processed_lidar: Optional[Dict[str, Any]] = None
         self._detect_clouds: Dict[str, Optional[Dict[str, Any]]] = {
+            # Full frame with per-point classes; supersedes the split clouds.
+            'semantic': None,
             'ground': None,
             'obstacles': None,
             'rocks': None,

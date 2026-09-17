@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional
 
 
 @dataclass
@@ -20,7 +19,3 @@ class CooldownGate:
             return False
         self.last_s = now_s
         return True
-
-
-def matching_detection(detections: Iterable[Any], side: Any) -> Optional[Any]:
-    return next((d for d in detections if d.details.get('side') == side), None)

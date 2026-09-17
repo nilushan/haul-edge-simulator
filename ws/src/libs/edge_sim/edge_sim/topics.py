@@ -29,6 +29,8 @@ class SensorBusContract:
 
     # --- processed outputs (processors publish, viz may also show) ----
     processed_lidar_topic: str = '/edge/lidar/processed'
+    # Full frame with a per-point class label (edge_perception.schema.Label)
+    semantic_cloud_topic: str = '/edge/lidar/semantic'
     ground_cloud_topic: str = '/edge/lidar/ground'
     obstacles_cloud_topic: str = '/edge/lidar/obstacles'
     rocks_cloud_topic: str = '/edge/lidar/rocks'

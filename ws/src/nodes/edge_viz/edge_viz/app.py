@@ -14,9 +14,11 @@ from typing import Any, List, Optional, Set
 
 from aiohttp import WSMsgType, web
 
+from edge_perception.schema import style_catalog
 from edge_sim.maps import DEFAULT_PLAYLIST
 from edge_sim.stream import default_streams_root
 from edge_sim.stream import StreamConfig, StreamHub
+from edge_viz.perception_overlay import PerceptionOverlay
 
 log = logging.getLogger('edge_viz')
 
@@ -105,6 +107,10 @@ def create_app(hub: Any, ws_hz: float = 10.0) -> web.Application:
             }
         )
 
+    async def api_classes(_: web.Request) -> web.Response:
+        """Class/event style table — single source of colours and labels."""
+        return web.json_response(style_catalog())
+
     async def api_catalog(_: web.Request) -> web.Response:
         return web.json_response(hub.catalog())
 
@@ -168,6 +174,7 @@ def create_app(hub: Any, ws_hz: float = 10.0) -> web.Application:
     app.router.add_get('/api/status', api_status)
     app.router.add_get('/api/config', api_config)
     app.router.add_get('/api/catalog', api_catalog)
+    app.router.add_get('/api/classes', api_classes)
     app.router.add_post('/api/select', api_select)
     app.router.add_get('/api/history/{kind}', api_history)
     app.router.add_get('/api/lidar', api_lidar)
@@ -246,6 +253,14 @@ def build_hub_from_args(args: argparse.Namespace) -> StreamHub:
     return StreamHub(cfg)
 
 
+def build_source_from_args(args: argparse.Namespace) -> Any:
+    """Hub, wrapped with inline perception unless the caller opted out."""
+    hub = build_hub_from_args(args)
+    if getattr(args, 'no_inline_detect', False):
+        return hub
+    return PerceptionOverlay(hub)
+
+
 def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     p = argparse.ArgumentParser(
@@ -279,6 +294,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument('--lidar-hz', type=float, default=10.0)
     p.add_argument('--ws-hz', type=float, default=10.0)
     p.add_argument('--speed', type=float, default=None)
+    p.add_argument(
+        '--no-inline-detect',
+        action='store_true',
+        help='serve raw hub ticks without the inline perception pass',
+    )
     args = p.parse_args(argv)
 
     # Normalize empty optionals
@@ -286,13 +306,13 @@ def main(argv: list[str] | None = None) -> None:
     args.record_dir = args.record_dir or None
     args.streams_root = args.streams_root or None
 
-    hub = build_hub_from_args(args)
-    app = create_app(hub, ws_hz=args.ws_hz)
+    source = build_source_from_args(args)
+    app = create_app(source, ws_hz=args.ws_hz)
 
-    cat = hub.catalog()
+    cat = source.catalog()
     log.info(
         'StreamHub mode=%s maps=%s streams=%d | Open http://%s:%s/',
-        hub.cfg.mode,
+        source.cfg.mode,
         [m['id'] for m in cat['maps']],
         len(cat['streams']),
         args.host,

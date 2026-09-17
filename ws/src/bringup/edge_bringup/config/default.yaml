@@ -32,6 +32,7 @@ edge_rock_detect:
     lidar_topic: /lidar
     rocks_cloud_topic: /edge/lidar/rocks
     obstacles_cloud_topic: /edge/lidar/obstacles
+    semantic_cloud_topic: /edge/lidar/semantic
     ground_cloud_topic: /edge/lidar/ground
     detections_topic: /edge/detections
     alerts_topic: /edge/alerts

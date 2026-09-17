@@ -14,6 +14,7 @@ import threading
 from typing import List, Optional
 
 from edge_viz.app import build_hub_from_args, create_app
+from edge_viz.perception_overlay import PerceptionOverlay
 from edge_sim.maps import DEFAULT_PLAYLIST
 from edge_sim.stream import StreamHub
 
@@ -71,6 +72,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     p.add_argument('--speed', type=float, default=None)
     p.add_argument('--ros', action='store_true', help='also publish ROS topics from the same hub')
     p.add_argument('--no-viz', action='store_true', help='hub + optional ROS only (no HTTP UI)')
+    p.add_argument(
+        '--no-inline-detect',
+        action='store_true',
+        help='serve raw hub ticks without the inline perception pass',
+    )
     args = p.parse_args(argv)
 
     args.stream = args.stream or None
@@ -127,7 +133,9 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     from aiohttp import web
 
-    app = create_app(hub, ws_hz=args.ws_hz)
+    # Viz subscribes through the perception overlay; ROS still reads the raw hub.
+    source = hub if args.no_inline_detect else PerceptionOverlay(hub)
+    app = create_app(source, ws_hz=args.ws_hz)
     log.info('Visualizer subscribing at http://%s:%s/', args.host, args.port)
     try:
         web.run_app(app, host=args.host, port=args.port, print=None)

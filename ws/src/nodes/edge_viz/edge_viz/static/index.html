@@ -23,7 +23,7 @@
     <header class="overlay top">
       <div>
         <h1>Haul truck edge suite</h1>
-        <p class="sub">Sensor bus / StreamHub · detection layers · edge alerts</p>
+        <p class="sub">Sensor bus / StreamHub · semantic classes · edge events</p>
       </div>
       <div class="badges">
         <label class="badge select">
@@ -61,18 +61,20 @@
       <div class="row"><span>Lat / Lon</span><b id="p_ll">—</b></div>
       <div class="row"><span>LiDAR returns</span><b id="p_lidar">—</b></div>
 
-      <h2>Detection layers</h2>
-      <div class="toggles" id="layerToggles">
+      <h2>Detection classes</h2>
+      <div class="toggles" id="classToggles"></div>
+      <div class="class-counts" id="classCounts"></div>
+
+      <h2>View</h2>
+      <div class="toggles" id="viewToggles">
         <label class="tog"><input type="checkbox" id="togRaw" checked /> raw scan</label>
         <label class="tog"><input type="checkbox" id="togMap" checked /> prior map</label>
-        <label class="tog"><input type="checkbox" id="togGround" /> ground</label>
-        <label class="tog"><input type="checkbox" id="togObstacles" checked /> obstacles</label>
-        <label class="tog"><input type="checkbox" id="togRocks" checked /> rocks</label>
-        <label class="tog"><input type="checkbox" id="togBunds" checked /> bunds</label>
-        <label class="tog"><input type="checkbox" id="togMarkers" /> markers</label>
+        <label class="tog"><input type="checkbox" id="togDetectMap" checked /> detection map</label>
+        <label class="tog"><input type="checkbox" id="togMarkers" checked /> event markers</label>
+        <label class="tog"><input type="checkbox" id="togLabels" checked /> event labels</label>
         <label class="tog"><input type="checkbox" id="togFullScan" checked /> full 360°</label>
       </div>
-      <div class="row"><span>Rocks / bunds pts</span><b id="p_detect">—</b></div>
+      <div class="row"><span>Corridor half-width</span><b id="p_road">—</b></div>
       <div class="row"><span>Vibe RMS a<sub>z</sub></span><b id="p_vibe">—</b></div>
     </aside>
 
@@ -88,16 +90,12 @@
       <div id="alertFeed" class="alert-feed" aria-live="polite">
         <div class="alert-empty">No alerts yet</div>
       </div>
-      <p class="hint">1 follow · 2 top · 3 free · M clear map · detection clouds from /edge/* bus topics</p>
+      <p class="hint">1 follow · 2 top · 3 free · M clear map · classes and events from the edge perception pass</p>
     </aside>
 
-    <div class="overlay legend">
-      <span class="swatch map-old"></span> map
-      <span class="swatch scan-now"></span> raw scan
-      <span class="swatch rock"></span> rocks (ahead)
-      <span class="swatch bund"></span> bunds (always)
-      <span class="swatch obstacle"></span> obstacles
-      <span class="swatch truck"></span> truck
+    <div class="overlay legend" id="legend">
+      <span class="legend-item"><span class="swatch map-old"></span>prior map</span>
+      <span class="legend-item"><span class="swatch truck"></span>truck</span>
     </div>
   </div>
 </body>

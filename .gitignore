@@ -26,3 +26,6 @@ ws/log/
 *.bag
 *.mcap
 *.db3
+
+# playwright MCP scratch output
+.playwright-mcp/

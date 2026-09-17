@@ -1,4 +1,4 @@
-"""Pure spatial tracking helpers for rock alert deduplication."""
+"""Pure spatial helpers for pose transforms and event deduplication."""
 
 from __future__ import annotations
 

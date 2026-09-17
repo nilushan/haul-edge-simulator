@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from edge_rock_detect.tracking import Pose2D, SpatialDeduplicator, body_to_map
+from edge_perception.tracking import Pose2D, SpatialDeduplicator, body_to_map
 
 
 def test_body_to_map_uses_vehicle_translation_and_yaw():

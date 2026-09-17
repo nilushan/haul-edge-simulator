@@ -21,6 +21,8 @@ class MapSpec:
     berm_width_m: float = 2.0
     n_rocks: int = 48
     rock_radius: Tuple[float, float] = (0.3, 1.15)
+    # Under-built / missing berm sections seeded along the route.
+    n_bund_defects: int = 4
     speed_mps: float = 8.0
     # Centerline: list of (amplitude_m, frequency_1/m, phase_rad)
     y_terms: Tuple[Tuple[float, float, float], ...] = (
@@ -64,6 +66,7 @@ class MapSpec:
             n_rocks=self.n_rocks,
             rock_radius=self.rock_radius,
             path=self.path_profile(),
+            n_bund_defects=self.n_bund_defects,
         )
 
 

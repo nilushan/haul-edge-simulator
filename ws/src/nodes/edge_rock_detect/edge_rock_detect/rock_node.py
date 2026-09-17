@@ -18,11 +18,10 @@ from std_msgs.msg import String
 
 from edge_perception.cloud_io import decode_xyz, encode_xyz_label
 from edge_perception.geometry import roi_mask, voxel_downsample
-from edge_perception.ground import estimate_ground_grid
-from edge_perception.rocks import RockParams, detect_rocks
-from edge_perception.schema import AlertEvent, DetectionSet, Label, Severity
+from edge_perception.schema import DetectionSet, Label
+from edge_perception.semantics import SemanticParams, classify_frame
 from edge_sim.topics import SensorBusContract
-from edge_rock_detect.tracking import Pose2D, SpatialDeduplicator, body_to_map
+from edge_perception.tracking import Pose2D, SpatialDeduplicator, body_to_map
 
 
 class RockDetectNode(Node):
@@ -31,6 +30,7 @@ class RockDetectNode(Node):
         c = SensorBusContract()
         self.declare_parameter('lidar_topic', c.lidar_topic)
         self.declare_parameter('rocks_cloud_topic', c.rocks_cloud_topic)
+        self.declare_parameter('semantic_cloud_topic', c.semantic_cloud_topic)
         self.declare_parameter('obstacles_cloud_topic', c.obstacles_cloud_topic)
         self.declare_parameter('ground_cloud_topic', c.ground_cloud_topic)
         self.declare_parameter('detections_topic', c.detections_topic)
@@ -50,16 +50,16 @@ class RockDetectNode(Node):
         self.alert_min_conf = float(self.get_parameter('alert_min_conf').value)
         self.publish_ground = bool(self.get_parameter('publish_ground').value)
         self.frame_map = str(self.get_parameter('frame_map').value)
-        self._params = RockParams()
         self._frames = 0
         self._alerts = 0
         self._bad_frames = 0
         self._pose: Optional[Pose2D] = None
         self._pose_received_at = -1e9
         self._odom_timeout_s = float(self.get_parameter('odom_timeout_s').value)
-        self._max_cluster_points = int(self.get_parameter('max_cluster_points').value)
-        if self._odom_timeout_s <= 0 or self._max_cluster_points < 1:
+        max_cluster_points = int(self.get_parameter('max_cluster_points').value)
+        if self._odom_timeout_s <= 0 or max_cluster_points < 1:
             raise ValueError('odom_timeout_s and max_cluster_points must be positive')
+        self._params = SemanticParams(max_cluster_points=max_cluster_points)
         self._dedup = SpatialDeduplicator(
             cell_m=float(self.get_parameter('dedup_cell_m').value),
             ttl_s=float(self.get_parameter('dedup_ttl_s').value),
@@ -75,6 +75,10 @@ class RockDetectNode(Node):
         )
         self.pub_ground = self.create_publisher(
             PointCloud2, str(self.get_parameter('ground_cloud_topic').value), qos_profile_sensor_data
+        )
+        self._semantic_cloud_topic = str(self.get_parameter('semantic_cloud_topic').value)
+        self.pub_semantic = self.create_publisher(
+            PointCloud2, self._semantic_cloud_topic, qos_profile_sensor_data
         )
         self.pub_det = self.create_publisher(String, str(self.get_parameter('detections_topic').value), 10)
         self.pub_alert = self.create_publisher(String, str(self.get_parameter('alerts_topic').value), 10)
@@ -110,68 +114,62 @@ class RockDetectNode(Node):
         pts, _inten = decode_xyz(msg)
         if pts.size == 0:
             return
-        mask = roi_mask(pts)
-        pts = pts[mask]
+        pts = pts[roi_mask(pts)]
         pts = voxel_downsample(pts, 0.15)
         if pts.shape[0] < 10:
             return
-
-        gr = estimate_ground_grid(pts)
-        ground = pts[gr.ground_idx]
-        obs = pts[gr.obstacle_idx]
-        hag_obs = gr.hag[gr.obstacle_idx]
-        if obs.shape[0] > self._max_cluster_points:
-            keep = np.linspace(0, obs.shape[0] - 1, self._max_cluster_points).astype(int)
-            obs = obs[keep]
-            hag_obs = hag_obs[keep]
-
-        if self.publish_ground and ground.shape[0]:
-            labels = np.full((ground.shape[0],), float(Label.GROUND), dtype=np.float32)
-            self.pub_ground.publish(encode_xyz_label(ground, msg.header, labels=labels))
-
-        if obs.shape[0]:
-            labels = np.full((obs.shape[0],), float(Label.OBSTACLE), dtype=np.float32)
-            self.pub_obs.publish(encode_xyz_label(obs, msg.header, labels=labels))
-
-        # Ignore near-field / body-locked ghosts (cab, hood) — only real ahead rocks
-        dets = [
-            d
-            for d in detect_rocks(obs, hag_obs, params=self._params)
-            if d.x >= 8.0 and abs(d.y) <= 6.0 and d.confidence >= 0.6
-        ]
-        rock_pts = []
-        rock_labels = []
-        rock_conf = []
-        for d in dets:
-            # approximate rock points: near centroid within radius
-            if obs.shape[0] == 0:
-                break
-            dist = np.linalg.norm(obs - np.array([d.x, d.y, d.z], dtype=np.float32), axis=1)
-            sel = dist <= max(d.radius_m * 1.2, 0.3)
-            if np.any(sel):
-                rock_pts.append(obs[sel])
-                n = int(sel.sum())
-                rock_labels.append(np.full((n,), float(Label.ROCK), dtype=np.float32))
-                rock_conf.append(np.full((n,), float(d.confidence), dtype=np.float32))
-
-        if rock_pts:
-            cloud = np.vstack(rock_pts)
-            self.pub_rocks.publish(
-                encode_xyz_label(
-                    cloud,
-                    msg.header,
-                    labels=np.concatenate(rock_labels),
-                    conf=np.concatenate(rock_conf),
-                )
-            )
 
         sensor_t = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9
         ros_now = float(self.get_clock().now().nanoseconds) * 1e-9
         t_ros = sensor_t if sensor_t > 0.0 else ros_now
         input_frame = msg.header.frame_id or 'base_link'
-        for detection in dets:
-            detection.frame_id = input_frame
-        dset = DetectionSet(t=sensor_t, frame_id=input_frame, source_node='edge_rock_detect', detections=dets)
+
+        # One classification pass feeds every cloud this node publishes, so the
+        # bus and the inline viz pipeline agree on the taxonomy.
+        result = classify_frame(
+            pts,
+            params=self._params,
+            t=sensor_t,
+            frame_id=input_frame,
+            vehicle_id=self.vehicle_id,
+            source_node='edge_rock_detect',
+        )
+        labels = result.labels.astype(np.float32)
+        self.pub_semantic.publish(
+            encode_xyz_label(pts, msg.header, labels=labels, conf=result.conf)
+        )
+
+        ground_mask = np.isin(result.labels, [int(Label.GROUND), int(Label.ROAD)])
+        if self.publish_ground and np.any(ground_mask):
+            self.pub_ground.publish(
+                encode_xyz_label(
+                    pts[ground_mask], msg.header, labels=labels[ground_mask]
+                )
+            )
+
+        obstacle_mask = result.labels == int(Label.OBSTACLE)
+        if np.any(obstacle_mask):
+            self.pub_obs.publish(
+                encode_xyz_label(
+                    pts[obstacle_mask], msg.header, labels=labels[obstacle_mask]
+                )
+            )
+
+        rock_mask = result.labels == int(Label.ROCK)
+        if np.any(rock_mask):
+            self.pub_rocks.publish(
+                encode_xyz_label(
+                    pts[rock_mask],
+                    msg.header,
+                    labels=labels[rock_mask],
+                    conf=result.conf[rock_mask],
+                )
+            )
+
+        dets = [d for d in result.detections if d.type == 'rock']
+        dset = DetectionSet(
+            t=sensor_t, frame_id=input_frame, source_node='edge_rock_detect', detections=dets
+        )
         s = String()
         s.data = json.dumps(dset.to_dict())
         self.pub_det.publish(s)
@@ -181,36 +179,17 @@ class RockDetectNode(Node):
             self._pose is not None
             and monotonic_now - self._pose_received_at <= self._odom_timeout_s
         )
-        for d in dets:
-            if d.confidence < self.alert_min_conf:
+        for alert in result.events:
+            if alert.type != 'rock' or alert.confidence < self.alert_min_conf:
                 continue
             if pose_fresh and self._pose is not None:
-                alert_x, alert_y, alert_z = body_to_map(d.x, d.y, d.z, self._pose)
-                alert_frame = self.frame_map
-            else:
-                alert_x, alert_y, alert_z = d.x, d.y, d.z
-                alert_frame = input_frame
-            if self._dedup.seen_recently(alert_x, alert_y, monotonic_now):
+                alert.x, alert.y, alert.z = body_to_map(alert.x, alert.y, alert.z, self._pose)
+                alert.frame_id = self.frame_map
+            if self._dedup.seen_recently(alert.x, alert.y, monotonic_now):
                 continue
-            sev = Severity.WARN if d.radius_m >= 0.7 or abs(d.y) < 3.0 else Severity.INFO
-            if d.details.get('range_m', 99) < 10 and abs(d.y) < 2.5:
-                sev = Severity.CRITICAL
-            alert = AlertEvent(
-                type='rock',
-                severity=sev,
-                confidence=d.confidence,
-                source_node='edge_rock_detect',
-                vehicle_id=self.vehicle_id,
-                frame_id=alert_frame,
-                t_ros=t_ros,
-                t_vehicle=sensor_t,
-                x=alert_x,
-                y=alert_y,
-                z=alert_z,
-                geometry={'kind': 'sphere', 'radius_m': d.radius_m, 'extent_m': list(d.extent_m)},
-                details={**d.details, 'pose_valid': pose_fresh},
-                cloud_ref={'topic': self._rocks_cloud_topic, 'stamp': sensor_t},
-            )
+            alert.t_ros = t_ros
+            alert.details = {**alert.details, 'pose_valid': pose_fresh}
+            alert.cloud_ref = {'topic': self._rocks_cloud_topic, 'stamp': sensor_t}
             a = String()
             a.data = json.dumps(alert.to_dict())
             self.pub_alert.publish(a)
