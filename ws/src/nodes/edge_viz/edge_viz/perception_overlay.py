@@ -85,7 +85,8 @@ class PerceptionOverlay:
         self._conf: List[float] = []
         self._detections: Optional[Dict[str, Any]] = None
         self._counts: Dict[str, int] = {}
-        self._road_hw = float(self._params.road_half_width_m)
+        self._corridor: Dict[str, float] = {}
+        self._sides: List[Dict[str, Any]] = []
 
     # --- delegation -------------------------------------------------------
 
@@ -134,6 +135,8 @@ class PerceptionOverlay:
         self._conf = []
         self._detections = None
         self._counts = {}
+        self._corridor = {}
+        self._sides = []
 
     def _annotate(self, tick: Dict[str, Any], latest_key: Optional[str] = None) -> None:
         odom = tick.get('odom')
@@ -158,7 +161,8 @@ class PerceptionOverlay:
             'alerts': list(self._alerts),
             'vibe': self._vibe_features,
             'counts': dict(self._counts),
-            'road_half_width_m': self._road_hw,
+            'corridor': dict(self._corridor),
+            'sides': list(self._sides),
             'source': SOURCE_NODE,
         }
 
@@ -193,7 +197,11 @@ class PerceptionOverlay:
         self._labels = result.labels.astype(int).tolist()
         self._conf = np.round(result.conf.astype(float), 3).tolist()
         self._counts = result.counts
-        self._road_hw = result.road_half_width_m
+        self._corridor = result.corridor.to_dict()
+        self._sides = [
+            {'side': side.side, 'kind': side.kind, 'edge_m': side.edge_m, 'rise_m': side.rise_m}
+            for side in result.sides
+        ]
         self._detections = DetectionSet(
             t=t,
             frame_id='base_link',

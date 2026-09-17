@@ -16,9 +16,17 @@ class MapSpec:
     title: str
     description: str
     seed: int = 19
-    road_half_width_m: float = 6.5
+    # Half-width of the running surface: haul roads carry three to four trucks
+    # abreast, so these are tens of metres wide, and they vary along the route.
+    road_half_width_m: float = 13.0
     berm_height_m: float = 1.65
-    berm_width_m: float = 2.0
+    berm_width_m: float = 2.6
+    # Hillside the road is cut into: batter up one side, drop off the other.
+    cut_slope: float = 0.75
+    cut_height_m: float = 9.0
+    fill_slope: float = 0.62
+    fill_depth_m: float = 14.0
+    lane_offset_frac: float = 0.45
     n_rocks: int = 48
     rock_radius: Tuple[float, float] = (0.3, 1.15)
     # Under-built / missing berm sections seeded along the route.
@@ -43,6 +51,14 @@ class MapSpec:
         (1.4, 0.018, 0.0),
         (0.7, 0.04, 0.8),
     )
+    # Width variation: (amplitude_m, freq_1/m, phase)
+    width_terms: Tuple[Tuple[float, float, float], ...] = (
+        (2.2, 0.0045, 0.0),
+        (1.1, 0.011, 1.3),
+    )
+    # How far the road runs before it crosses to the other side of the hill.
+    tilt_period_m: float = 460.0
+    tilt_phase: float = 0.35
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -55,6 +71,9 @@ class MapSpec:
             x_wiggle_freq=self.x_wiggle_freq,
             grades=self.grades,
             undulation=self.undulation,
+            width_terms=self.width_terms,
+            tilt_period_m=self.tilt_period_m,
+            tilt_phase=self.tilt_phase,
         )
 
     def build_world(self) -> HaulWorld:
@@ -67,6 +86,11 @@ class MapSpec:
             rock_radius=self.rock_radius,
             path=self.path_profile(),
             n_bund_defects=self.n_bund_defects,
+            cut_slope=self.cut_slope,
+            cut_height_m=self.cut_height_m,
+            fill_slope=self.fill_slope,
+            fill_depth_m=self.fill_depth_m,
+            lane_offset_frac=self.lane_offset_frac,
         )
 
 
@@ -76,18 +100,28 @@ MAPS: Dict[str, MapSpec] = {
     'haul_corridor': MapSpec(
         id='haul_corridor',
         title='Haul corridor',
-        description='Default snaking corridor with berms, grades, and mixed rocks.',
+        description='Three-lane haul road cut into a hillside, with grades and mixed rocks.',
         seed=19,
+        road_half_width_m=13.0,
     ),
     'tight_switchbacks': MapSpec(
         id='tight_switchbacks',
         title='Tight switchbacks',
-        description='Narrow road, sharp lateral wiggles, tall bunds — mine switchback feel.',
+        description='Narrower switchback road, steep batters, tall bunds over a long drop.',
         seed=41,
-        road_half_width_m=4.8,
+        road_half_width_m=11.5,
         berm_height_m=2.2,
-        berm_width_m=1.6,
+        berm_width_m=2.2,
+        cut_slope=0.95,
+        cut_height_m=12.0,
+        fill_slope=0.8,
+        fill_depth_m=22.0,
         n_rocks=36,
+        width_terms=(
+            (1.4, 0.009, 0.4),
+            (0.8, 0.02, 1.9),
+        ),
+        tilt_period_m=300.0,
         rock_radius=(0.25, 0.9),
         speed_mps=6.0,
         y_terms=(
@@ -111,12 +145,21 @@ MAPS: Dict[str, MapSpec] = {
     'open_pit_bench': MapSpec(
         id='open_pit_bench',
         title='Open-pit bench',
-        description='Wide bench road, long gentle curve, sparse rocks, big elevation steps.',
+        description='Widest bench road, gentle curve, low batters, sparse rocks, big elevation steps.',
         seed=77,
-        road_half_width_m=9.0,
+        road_half_width_m=14.5,
         berm_height_m=1.2,
-        berm_width_m=2.8,
+        berm_width_m=3.2,
+        cut_slope=0.55,
+        cut_height_m=6.0,
+        fill_slope=0.5,
+        fill_depth_m=10.0,
         n_rocks=22,
+        width_terms=(
+            (3.0, 0.003, 0.2),
+            (1.4, 0.008, 1.0),
+        ),
+        tilt_period_m=620.0,
         rock_radius=(0.4, 1.4),
         speed_mps=9.0,
         y_terms=(
@@ -139,12 +182,17 @@ MAPS: Dict[str, MapSpec] = {
     'rocky_descent': MapSpec(
         id='rocky_descent',
         title='Rocky descent',
-        description='Steep downhill haul with dense rock field and rough shoulders.',
+        description='Steep downhill haul with dense rock field, high batter and long fall away.',
         seed=103,
-        road_half_width_m=6.0,
+        road_half_width_m=12.0,
         berm_height_m=1.9,
-        berm_width_m=2.2,
+        berm_width_m=2.6,
+        cut_slope=0.85,
+        cut_height_m=11.0,
+        fill_slope=0.7,
+        fill_depth_m=18.0,
         n_rocks=72,
+        tilt_period_m=380.0,
         rock_radius=(0.35, 1.35),
         speed_mps=7.0,
         y_terms=(

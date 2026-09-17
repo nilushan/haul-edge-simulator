@@ -65,10 +65,25 @@ ros2 bag play your_drive.mcap   # remap onto bus topics
 STREAM_MODE=replay ./scripts/run_viz.sh
 ```
 
+## Terrain
+
+Each map is a haul road cut into a hillside, not a flat strip:
+
+- **Three to four trucks wide** (19–38 m depending on the map) and the width
+  varies along the route.
+- **Cross-slope:** one shoulder climbs into a cut batter, the other falls away
+  and carries the safety bund. The road crosses from one side of the hill to
+  the other every few hundred metres.
+- **The truck runs in a lane**, not down the middle, so the near shoulder is a
+  few metres away and the far one can be twenty — which is what makes the
+  detection problem asymmetric.
+- A few under-built and missing bund sections are seeded on shoulders that
+  actually carry a bund, so the bund checks have something real to find.
+
 ## Detection classes and events
 
 Every LiDAR frame is classified into **road**, **ground**, **bund**,
-**bund low**, **rock**, **non-ground** and **unclassified**, and the classes
+**bund low**, **cut batter**, **rock**, **non-ground** and **unclassified**, and the classes
 drive both the 3D colours and the toggles in the browser. Findings worth acting
 on are raised as events and frozen on the map where they were first seen, each
 with a colour-coded marker and a text tag:
@@ -80,13 +95,16 @@ with a colour-coded marker and a text tag:
 | No berm over a stretch of shoulder | `BUND GAP · 18 m · right` |
 | Ride roughness over threshold | `VIBE` |
 
+A bund is only judged where the scan actually reached over the crest and back
+down the far side, which in practice means the shoulder the truck is driving
+beside. The far shoulder of a 30 m road is reported as a bund, with no height
+claim attached.
+
 The class and event styles come from one table
 (`edge_perception.schema.style_catalog`, served at `/api/classes`), so the
 legend, toggles, point colours, markers and event feed stay in step.
 
-Every map seeds a few under-built and missing berm sections
-(`MapSpec.n_bund_defects`) so there is something real for the bund checks to
-find. See [`docs/EDGE_ARCHITECTURE.md`](docs/EDGE_ARCHITECTURE.md) for the
+See [`docs/EDGE_ARCHITECTURE.md`](docs/EDGE_ARCHITECTURE.md) for the
 thresholds and what the detector deliberately refuses to claim.
 
 ## Maps

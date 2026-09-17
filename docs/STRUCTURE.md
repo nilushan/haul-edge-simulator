@@ -9,7 +9,7 @@ ws/src/
 │   ├── edge_sim/                 # maps, sensor models, StreamHub, topic contract
 │   │   └── edge_sim/
 │   │       ├── maps.py
-│   │       ├── models/           # world, vehicle, imu, gnss, lidar
+│   │       ├── models/           # world (cut/fill terrain), vehicle, imu, gnss, lidar
 │   │       ├── stream/           # StreamHub + JSONL format
 │   │       ├── topics.py         # shared bus topic names
 │   │       └── tools/

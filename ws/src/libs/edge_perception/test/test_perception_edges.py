@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from edge_perception.bunds import detect_bunds, extract_crest
+from edge_perception.bunds import BundParams, detect_bunds, extract_crest
 from edge_perception.cloud_io import decode_xyz
 from edge_perception.ground import estimate_ground_grid
 from edge_perception.rocks import detect_rocks
@@ -152,7 +152,7 @@ def test_bund_detection_uses_road_ground_for_height():
     )
     points = np.vstack([road, left_bund]).astype(np.float32)
 
-    detections, alerts = detect_bunds(points)
+    detections, alerts = detect_bunds(points, BundParams(road_half_width_m=6.5))
 
     left = next(d for d in detections if d.details['side'] == 'left')
     assert left.details['mean_height_m'] >= 1.0
@@ -161,7 +161,9 @@ def test_bund_detection_uses_road_ground_for_height():
 
 
 def test_empty_cloud_does_not_claim_a_physical_bund_gap():
-    detections, alerts = detect_bunds(np.zeros((0, 3), dtype=np.float32))
+    detections, alerts = detect_bunds(
+        np.zeros((0, 3), dtype=np.float32), BundParams(road_half_width_m=6.5)
+    )
     assert detections == []
     assert alerts == []
 
@@ -169,7 +171,7 @@ def test_empty_cloud_does_not_claim_a_physical_bund_gap():
 def test_one_observed_shoulder_does_not_claim_unobserved_opposite_gap():
     xs = np.linspace(5.0, 30.0, 40)
     left_only = np.column_stack([xs, np.full_like(xs, 7.0), np.ones_like(xs)])
-    _, alerts = detect_bunds(left_only.astype(np.float32))
+    _, alerts = detect_bunds(left_only.astype(np.float32), BundParams(road_half_width_m=6.5))
     assert not any(a['type'] == 'bund_gap' and a['side'] == 'right' for a in alerts)
 
 

@@ -34,10 +34,13 @@ class SemanticParams:
 
     ground_cell_m: float = 0.75
     ground_band_m: float = 0.20
-    # Fallback corridor width when the crest estimate has too little support.
-    road_half_width_m: float = 6.5
-    road_margin_m: float = 0.6
-    shoulder_band_m: float = 3.5
+    # Fallback corridor width when the toe estimate has too little support.
+    # Haul roads run three to four trucks abreast, so this is tens of metres.
+    road_half_width_m: float = 12.0
+    min_road_half_width_m: float = 3.0
+    max_road_half_width_m: float = 24.0
+    road_margin_m: float = 0.8
+    shoulder_band_m: float = 4.0
     x_bin_m: float = 2.0
     min_bin_points: int = 2
     # Design height of a compliant bund and the height below which it is an
@@ -50,11 +53,21 @@ class SemanticParams:
     min_shoulder_span_m: float = 12.0
     # Beyond this range the straight-corridor model stops holding on curves.
     corridor_max_x_m: float = 30.0
-    # A crest is only measurable when the shoulder was sampled this far past
-    # it; otherwise the beam grazed the inner flank and would read low.
-    crest_observed_beyond_m: float = 0.6
+    # A crest is only measurable when the scan reaches past it and comes back
+    # down the far side. Looking along a distant shoulder the beams skim over
+    # the crest and stop on the inner flank, which reads as a low bund.
+    crest_observed_beyond_m: float = 0.4
+    crest_drop_beyond_m: float = 0.25
+    # Absence of returns only means a missing bund on a shoulder close enough
+    # for the scan to resolve it at all.
+    gap_max_edge_m: float = 13.0
     # An unsampled shoulder only counts as absent within this range.
     gap_observed_max_x_m: float = 22.0
+    # A shoulder whose terrain keeps climbing past the berm line is a cut
+    # batter, not a missing bund: nothing has to stop a truck falling uphill.
+    cut_probe_min_m: float = 3.0
+    cut_probe_max_m: float = 12.0
+    cut_min_rise_m: float = 2.0
     obstacle_min_hag_m: float = 0.25
     # Ceiling on points handed to the clusterer, so a dense frame cannot
     # stall an edge node or the viz tick pump.
@@ -62,6 +75,65 @@ class SemanticParams:
     event_min_range_m: float = 6.0
     event_max_range_m: float = 30.0
     rock: RockParams = field(default_factory=RockParams)
+
+
+@dataclass
+class Corridor:
+    """
+    Distance from the vehicle to each edge of the running surface.
+
+    A wide haul road curves away within the look-ahead, so the edge is held per
+    longitudinal bin; ``left_m`` / ``right_m`` are the representative values
+    used for reporting and as the fallback for bins with no measurement.
+    """
+
+    left_m: float
+    right_m: float
+    left_bins: Dict[int, float] = field(default_factory=dict)
+    right_bins: Dict[int, float] = field(default_factory=dict)
+
+    @property
+    def half_width_m(self) -> float:
+        return 0.5 * (self.left_m + self.right_m)
+
+    @property
+    def width_m(self) -> float:
+        return self.left_m + self.right_m
+
+    def edge(self, side: str) -> float:
+        return self.left_m if side == 'left' else self.right_m
+
+    def bin_edges(self, side: str) -> Dict[int, float]:
+        return self.left_bins if side == 'left' else self.right_bins
+
+    def edge_at(self, side: str, bin_index: int) -> float:
+        return self.bin_edges(side).get(int(bin_index), self.edge(side))
+
+    def per_point(self, side: str, bins: np.ndarray) -> np.ndarray:
+        """Edge distance for every point, from its own longitudinal bin."""
+        edges = np.full(bins.shape, self.edge(side), dtype=np.float64)
+        for bin_index, value in self.bin_edges(side).items():
+            edges[bins == bin_index] = value
+        return edges
+
+    def to_dict(self) -> Dict[str, float]:
+        return {
+            'left_m': self.left_m,
+            'right_m': self.right_m,
+            'width_m': self.width_m,
+            'half_width_m': self.half_width_m,
+        }
+
+
+@dataclass
+class SideProfile:
+    """What one shoulder is: a falling edge that needs a bund, or a batter."""
+
+    side: str
+    kind: str  # 'fill' | 'cut'
+    edge_m: float
+    rise_m: float  # terrain height change just beyond the shoulder
+    segments: List['BundSegment'] = field(default_factory=list)
 
 
 @dataclass
@@ -90,197 +162,332 @@ class FrameSemantics:
     labels: np.ndarray  # (N,) int16, aligned with the input points
     conf: np.ndarray  # (N,) float32
     hag: np.ndarray  # (N,) float32, NaN where no ground support
-    road_half_width_m: float
+    corridor: Corridor
     detections: List[Detection] = field(default_factory=list)
     events: List[AlertEvent] = field(default_factory=list)
     segments: List[BundSegment] = field(default_factory=list)
+    sides: List[SideProfile] = field(default_factory=list)
     counts: Dict[str, int] = field(default_factory=dict)
+
+    @property
+    def road_half_width_m(self) -> float:
+        return self.corridor.half_width_m
 
 
 def _side_sign(side: str) -> float:
     return 1.0 if side == 'left' else -1.0
 
 
-def estimate_road_half_width(
+def fit_road_plane(
     points: np.ndarray,
     params: SemanticParams,
-) -> float:
+) -> Optional[Tuple[float, float, float]]:
     """
-    Lateral half-width of the drivable corridor, measured from the berm toes.
+    Least-squares plane through the running surface: ``z = a·x + b·y + c``.
 
-    Per longitudinal bin the road surface is referenced from the lane centre,
-    then the innermost clearly raised return on each side marks the berm toe.
-    Taking a percentile of the per-bin toes keeps a few rocks near the shoulder
-    from pulling the corridor in. Falls back to the configured width when too
-    few bins carry a toe.
-    """
-    p = params
-    finite = np.all(np.isfinite(points), axis=1)
-    finite &= np.abs(points[:, 0]) <= p.corridor_max_x_m
-    if not np.any(finite):
-        return float(p.road_half_width_m)
-
-    x, y, z = points[:, 0], points[:, 1], points[:, 2]
-    idx = np.flatnonzero(finite)
-    bins = np.floor(x[idx] / p.x_bin_m).astype(np.int64)
-    centre_lane = np.abs(y[idx]) <= 2.5
-
-    toes: List[float] = []
-    for b in np.unique(bins):
-        in_bin = bins == b
-        lane = idx[in_bin & centre_lane]
-        if lane.size < p.min_bin_points:
-            continue
-        reference = float(np.percentile(z[lane], 20.0))
-        raised = idx[in_bin & ~centre_lane]
-        raised = raised[(z[raised] - reference) >= p.bund_present_min_m]
-        raised = raised[np.abs(y[raised]) <= 16.0]
-        if raised.size:
-            toes.append(float(np.min(np.abs(y[raised]))))
-    if len(toes) < 3:
-        return float(p.road_half_width_m)
-    # The toe is where the berm starts rising, which is exactly the edge of
-    # the drivable surface — no further margin is applied here.
-    estimate = float(np.percentile(toes, 60.0))
-    if not np.isfinite(estimate):
-        return float(p.road_half_width_m)
-    return float(np.clip(estimate, 3.0, 12.0))
-
-
-def _bund_segments(
-    points: np.ndarray,
-    hag: np.ndarray,
-    labels: np.ndarray,
-    conf: np.ndarray,
-    road_hw: float,
-    params: SemanticParams,
-) -> List[BundSegment]:
-    """
-    Classify each shoulder bin, label its points, and group runs of bins.
-
-    Crest height is measured against the road surface in the same longitudinal
-    bin, not against the local ground grid: inside a berm the grid estimate
-    rides up with the berm itself and would report a crest of a few centimetres.
+    A constant height per longitudinal bin is only valid if the road is level
+    across its width in the body frame, and it is not: a couple of degrees of
+    vehicle roll lifts one side of a 30 m road by most of a metre, which is
+    more than a bund is tall. Seeding from the lane the truck is in and
+    re-fitting over the points that agree with the plane recovers the surface
+    including its roll, pitch, and cross-fall.
     """
     p = params
     x, y, z = points[:, 0], points[:, 1], points[:, 2]
-    finite = np.all(np.isfinite(points), axis=1)
-    # The straight-corridor model only holds near the vehicle; beyond that the
-    # haul road curves out of the body-frame band.
-    finite &= np.abs(x) <= p.corridor_max_x_m
-    if not np.any(finite):
-        return []
+    usable = np.all(np.isfinite(points), axis=1) & (np.abs(x) <= p.corridor_max_x_m)
+    selected = usable & (np.abs(y) <= 3.0)
+    if int(np.count_nonzero(selected)) < 20:
+        return None
 
-    inner = road_hw - p.road_margin_m
-    outer = road_hw + p.shoulder_band_m
-    x_min = float(np.min(x[finite]))
-    road_seen = finite & (np.abs(y) <= road_hw * 0.75)
-    if not np.any(road_seen):
-        return []
+    plane: Optional[Tuple[float, float, float]] = None
+    for _ in range(3):
+        idx = np.flatnonzero(selected)
+        design = np.column_stack([x[idx], y[idx], np.ones(idx.size)])
+        try:
+            coefficients, *_ = np.linalg.lstsq(design, z[idx], rcond=None)
+        except np.linalg.LinAlgError:
+            return plane
+        plane = (float(coefficients[0]), float(coefficients[1]), float(coefficients[2]))
+        residual = z - (plane[0] * x + plane[1] * y + plane[2])
+        grown = usable & (np.abs(residual) <= 0.25) & (np.abs(y) <= p.max_road_half_width_m)
+        if int(np.count_nonzero(grown)) < 30:
+            break
+        selected = grown
+    return plane
 
-    def bin_of(values: np.ndarray) -> np.ndarray:
-        return np.floor((values - x_min) / p.x_bin_m).astype(np.int64)
 
-    road_idx = np.flatnonzero(road_seen)
-    road_bins = bin_of(x[road_idx])
-    road_z: Dict[int, float] = {}
-    for b in np.unique(road_bins):
-        sel = road_idx[road_bins == b]
+def _reference_z(
+    points: np.ndarray,
+    params: SemanticParams,
+) -> Tuple[np.ndarray, np.ndarray, Dict[int, bool], float]:
+    """
+    Per-point road height, longitudinal bin, and which bins saw the road.
+
+    Falls back to a flat reference from the lane band when the cloud is too
+    sparse to fit a plane.
+    """
+    p = params
+    x, y, z = points[:, 0], points[:, 1], points[:, 2]
+    usable = np.all(np.isfinite(points), axis=1) & (np.abs(x) <= p.corridor_max_x_m)
+    bins = np.full(points.shape[0], -1, dtype=np.int64)
+    reference = np.full(points.shape[0], np.nan, dtype=np.float64)
+    if not np.any(usable):
+        return bins, reference, {}, 0.0
+
+    x_min = float(np.min(x[usable]))
+    bins[usable] = np.floor((x[usable] - x_min) / p.x_bin_m).astype(np.int64)
+
+    plane = fit_road_plane(points, p)
+    if plane is not None:
+        reference[usable] = plane[0] * x[usable] + plane[1] * y[usable] + plane[2]
+    else:
+        lane = usable & (np.abs(y) <= 2.5)
+        for b in np.unique(bins[lane]):
+            sel = np.flatnonzero(lane & (bins == b))
+            if sel.size >= p.min_bin_points:
+                reference[bins == b] = float(np.percentile(z[sel], 20.0))
+
+    lane = usable & (np.abs(y) <= 3.0)
+    observed: Dict[int, bool] = {}
+    for b in np.unique(bins[lane]):
+        sel = np.flatnonzero(lane & (bins == b))
         if sel.size >= p.min_bin_points:
-            road_z[int(b)] = float(np.percentile(z[sel], 20.0))
-    if not road_z:
-        return []
+            observed[int(b)] = True
+    return bins, reference, observed, x_min
 
-    segments: List[BundSegment] = []
+
+def _smooth_bin_series(values: Dict[int, float], window: int = 5) -> Dict[int, float]:
+    """
+    Rolling median over neighbouring bins.
+
+    A rock sitting near the shoulder corrupts the toe in its own bin; the
+    shoulder itself is continuous, so the neighbours outvote it.
+    """
+    if not values:
+        return {}
+    keys = sorted(values)
+    half = max(int(window) // 2, 1)
+    smoothed: Dict[int, float] = {}
+    for i, key in enumerate(keys):
+        window_keys = keys[max(0, i - half): i + half + 1]
+        smoothed[key] = float(np.median([values[k] for k in window_keys]))
+    return smoothed
+
+
+def estimate_corridor(points: np.ndarray, params: SemanticParams) -> Corridor:
+    """
+    Distance to each edge of the running surface, per side and per bin.
+
+    A truck runs in a lane, so the near shoulder can be a few metres away while
+    the far one is twenty; a single symmetric width would put the shoulder band
+    in the wrong place on both sides. Within each longitudinal bin the
+    innermost clearly raised return marks that side's edge, which also follows
+    the road as it curves out of the body-frame band.
+    """
+    p = params
+    fallback = float(np.clip(p.road_half_width_m, p.min_road_half_width_m, p.max_road_half_width_m))
+    bins, reference, observed, _ = _reference_z(points, p)
+    if not observed:
+        return Corridor(fallback, fallback)
+
+    y, z = points[:, 1], points[:, 2]
+    above = np.where(np.isfinite(reference), z - reference, np.nan)
+    representative: Dict[str, float] = {}
+    per_bin: Dict[str, Dict[int, float]] = {}
     for side in ('left', 'right'):
         sign = _side_sign(side)
         lateral = sign * y
-        shoulder_idx = np.flatnonzero(finite & (lateral >= inner) & (lateral <= outer))
-        shoulder_bins = bin_of(x[shoulder_idx]) if shoulder_idx.size else np.zeros((0,), dtype=np.int64)
-
-        states: Dict[int, Tuple[str, float, float, float]] = {}
-        for b in sorted(road_z):
-            reference = road_z[b]
-            sel = shoulder_idx[shoulder_bins == b] if shoulder_idx.size else np.zeros((0,), dtype=np.int64)
-            if sel.size < p.min_bin_points:
-                bin_x = x_min + (b + 0.5) * p.x_bin_m
-                observed = abs(float(bin_x)) <= p.gap_observed_max_x_m
-                states[b] = (
-                    'missing' if observed else 'unknown',
-                    float('nan'),
-                    sign * (road_hw + 1.0),
-                    reference,
+        candidates = (bins >= 0) & (lateral > 2.5) & (lateral <= p.max_road_half_width_m + 6.0)
+        toes: Dict[int, float] = {}
+        for b in observed:
+            sel = np.flatnonzero(candidates & (bins == b))
+            if sel.size == 0:
+                continue
+            raised = sel[above[sel] >= p.bund_present_min_m]
+            if raised.size:
+                toes[int(b)] = float(
+                    np.clip(
+                        np.min(lateral[raised]),
+                        p.min_road_half_width_m,
+                        p.max_road_half_width_m,
+                    )
                 )
-                continue
-            crest = sel[int(np.argmax(z[sel]))]
-            height = float(z[crest] - reference)
-            # Only the raised part of the shoulder is bund; its apron is ground.
-            raised = sel[z[sel] - reference > 0.5 * p.bund_present_min_m]
-            measurable = (
-                float(np.max(lateral[sel]) - lateral[crest]) >= p.crest_observed_beyond_m
+        smoothed = _smooth_bin_series(toes)
+        per_bin[side] = smoothed
+        representative[side] = (
+            float(np.median(list(smoothed.values()))) if len(smoothed) >= 3 else fallback
+        )
+    return Corridor(
+        left_m=representative['left'],
+        right_m=representative['right'],
+        left_bins=per_bin['left'],
+        right_bins=per_bin['right'],
+    )
+
+
+def estimate_road_half_width(points: np.ndarray, params: SemanticParams) -> float:
+    """Mean of the two corridor edges (see :func:`estimate_corridor`)."""
+    return estimate_corridor(points, params).half_width_m
+
+
+def _side_profile(
+    points: np.ndarray,
+    labels: np.ndarray,
+    conf: np.ndarray,
+    side: str,
+    corridor: Corridor,
+    bins: np.ndarray,
+    reference: np.ndarray,
+    observed: Dict[int, bool],
+    x_min: float,
+    params: SemanticParams,
+) -> SideProfile:
+    """
+    Classify one shoulder: cut batter, or a falling edge that needs a bund.
+
+    Crest height is measured against the road surface in the same longitudinal
+    bin, not against the local ground grid: inside a berm the grid estimate
+    rides up with the berm itself and would report a few centimetres.
+    """
+    p = params
+    x, y, z = points[:, 0], points[:, 1], points[:, 2]
+    sign = _side_sign(side)
+    lateral = sign * y
+    usable = (bins >= 0) & np.isfinite(reference)
+    edge_m = corridor.edge(side)
+    edges = corridor.per_point(side, bins)
+    above = np.where(np.isfinite(reference), z - reference, np.nan)
+
+    # Does the ground keep climbing past where a berm would sit? Then this is
+    # the high side of the road and no bund is expected.
+    rises: List[float] = []
+    probe = usable & (lateral >= edges + p.cut_probe_min_m) & (lateral <= edges + p.cut_probe_max_m)
+    for b in observed:
+        sel = np.flatnonzero(probe & (bins == b))
+        if sel.size >= p.min_bin_points:
+            rises.append(float(np.percentile(above[sel], 75.0)))
+    rise = float(np.median(rises)) if len(rises) >= 2 else 0.0
+    kind = 'cut' if rise >= p.cut_min_rise_m else 'fill'
+
+    inner = edges - p.road_margin_m
+    outer = edges + p.shoulder_band_m
+    if kind == 'cut':
+        # The whole batter is one class: it is terrain, not an obstruction.
+        batter = np.flatnonzero(usable & (lateral >= inner) & (above > 0.3))
+        if batter.size:
+            labels[batter] = int(Label.CUT_SLOPE)
+            conf[batter] = float(np.clip(rise / max(p.cut_min_rise_m * 2.0, 1e-3), 0.4, 1.0))
+        return SideProfile(side=side, kind=kind, edge_m=edge_m, rise_m=rise)
+
+    shoulder_idx = np.flatnonzero(usable & (lateral >= inner) & (lateral <= outer))
+    states: Dict[int, Tuple[str, float, float, float]] = {}
+    for b in sorted(observed):
+        bin_edge = corridor.edge_at(side, b)
+        sel = shoulder_idx[bins[shoulder_idx] == b] if shoulder_idx.size else np.zeros((0,), dtype=np.int64)
+        if sel.size < p.min_bin_points:
+            bin_x = x_min + (b + 0.5) * p.x_bin_m
+            in_range = (
+                abs(float(bin_x)) <= p.gap_observed_max_x_m
+                and bin_edge <= p.gap_max_edge_m
             )
-
-            if height < p.bund_present_min_m:
-                absent = measurable or abs(float(x[crest])) <= p.gap_observed_max_x_m
-                states[b] = (
-                    'missing' if absent else 'unknown',
-                    height,
-                    float(y[crest]),
-                    float(z[crest]),
-                )
-                continue
-            if not measurable:
-                # Structure is there but its top was never sampled: show it as a
-                # bund, and raise no height finding we cannot stand behind.
-                states[b] = ('unknown', float('nan'), float(y[crest]), float(z[crest]))
-                labels[raised] = int(Label.BUND)
-                conf[raised] = 0.35
-                continue
-
-            state = 'ok' if height >= p.bund_min_height_m else 'low'
-            states[b] = (state, height, float(y[crest]), float(z[crest]))
-            label = Label.BUND if state == 'ok' else Label.BUND_LOW
-            labels[raised] = int(label)
-            if state == 'ok':
-                conf[raised] = float(np.clip(height / max(p.bund_spec_height_m, 1e-3), 0.4, 1.0))
-            else:
-                deficit = (p.bund_min_height_m - height) / max(p.bund_min_height_m, 1e-3)
-                conf[raised] = float(np.clip(0.55 + 0.45 * deficit, 0.0, 1.0))
-
-        ordered = sorted(states)
-        run_start: Optional[int] = None
-        for position, b in enumerate(ordered):
-            state = states[b][0]
-            if run_start is None:
-                run_start = b
-            is_last = position == len(ordered) - 1
-            contiguous = (
-                not is_last
-                and ordered[position + 1] == b + 1
-                and states[ordered[position + 1]][0] == state
+            states[b] = (
+                'missing' if in_range else 'unknown',
+                float('nan'),
+                sign * (bin_edge + 1.0),
+                0.0,
             )
-            if contiguous:
-                continue
-            run = [k for k in ordered if run_start <= k <= b]
-            heights = np.asarray([states[k][1] for k in run], dtype=float)
-            known = heights[np.isfinite(heights)]
-            ys = np.asarray([states[k][2] for k in run], dtype=float)
-            zs = np.asarray([states[k][3] for k in run], dtype=float)
-            segments.append(
-                BundSegment(
-                    side=side,
-                    state=state,
-                    x_start=x_min + run_start * p.x_bin_m,
-                    x_end=x_min + (b + 1) * p.x_bin_m,
-                    y=float(np.mean(ys)),
-                    z=float(np.mean(zs)),
-                    min_height_m=float(np.min(known)) if known.size else float('nan'),
-                    mean_height_m=float(np.mean(known)) if known.size else float('nan'),
-                    bins=len(run),
-                )
-            )
-            run_start = None
+            continue
 
+        crest = sel[int(np.argmax(above[sel]))]
+        height = float(above[crest])
+        raised = sel[above[sel] > 0.5 * p.bund_present_min_m]
+        # The top was seen only if the scan carried on past the crest and came
+        # back down; otherwise the beam simply stopped on the inner flank.
+        beyond = sel[lateral[sel] > lateral[crest] + p.crest_observed_beyond_m]
+        measurable = bool(
+            beyond.size and float(np.min(above[beyond])) <= height - p.crest_drop_beyond_m
+        )
+        close_enough = bin_edge <= p.gap_max_edge_m
+
+        if height < p.bund_present_min_m:
+            absent = close_enough and (
+                measurable or abs(float(x[crest])) <= p.gap_observed_max_x_m
+            )
+            states[b] = (
+                'missing' if absent else 'unknown',
+                height,
+                float(y[crest]),
+                float(z[crest]),
+            )
+            continue
+        if not measurable:
+            # Structure is there but its top was never sampled: show it as a
+            # bund, and raise no height finding we cannot stand behind.
+            states[b] = ('unknown', float('nan'), float(y[crest]), float(z[crest]))
+            labels[raised] = int(Label.BUND)
+            conf[raised] = 0.35
+            continue
+
+        state = 'ok' if height >= p.bund_min_height_m else 'low'
+        states[b] = (state, height, float(y[crest]), float(z[crest]))
+        label = Label.BUND if state == 'ok' else Label.BUND_LOW
+        labels[raised] = int(label)
+        if state == 'ok':
+            conf[raised] = float(np.clip(height / max(p.bund_spec_height_m, 1e-3), 0.4, 1.0))
+        else:
+            deficit = (p.bund_min_height_m - height) / max(p.bund_min_height_m, 1e-3)
+            conf[raised] = float(np.clip(0.55 + 0.45 * deficit, 0.0, 1.0))
+
+    return SideProfile(
+        side=side,
+        kind=kind,
+        edge_m=edge_m,
+        rise_m=rise,
+        segments=_group_runs(side, states, x_min, p),
+    )
+
+
+def _group_runs(
+    side: str,
+    states: Dict[int, Tuple[str, float, float, float]],
+    x_min: float,
+    params: SemanticParams,
+) -> List[BundSegment]:
+    """Collapse per-bin states into contiguous runs of the same finding."""
+    ordered = sorted(states)
+    segments: List[BundSegment] = []
+    run_start: Optional[int] = None
+    for position, b in enumerate(ordered):
+        state = states[b][0]
+        if run_start is None:
+            run_start = b
+        is_last = position == len(ordered) - 1
+        contiguous = (
+            not is_last
+            and ordered[position + 1] == b + 1
+            and states[ordered[position + 1]][0] == state
+        )
+        if contiguous:
+            continue
+        run = [k for k in ordered if run_start <= k <= b]
+        heights = np.asarray([states[k][1] for k in run], dtype=float)
+        known = heights[np.isfinite(heights)]
+        ys = np.asarray([states[k][2] for k in run], dtype=float)
+        zs = np.asarray([states[k][3] for k in run], dtype=float)
+        segments.append(
+            BundSegment(
+                side=side,
+                state=state,
+                x_start=x_min + run_start * params.x_bin_m,
+                x_end=x_min + (b + 1) * params.x_bin_m,
+                y=float(np.mean(ys)),
+                z=float(np.mean(zs)),
+                min_height_m=float(np.min(known)) if known.size else float('nan'),
+                mean_height_m=float(np.mean(known)) if known.size else float('nan'),
+                bins=len(run),
+            )
+        )
+        run_start = None
     return segments
 
 
@@ -459,7 +666,7 @@ def classify_frame(
             labels=labels,
             conf=conf,
             hag=np.zeros((0,), dtype=np.float32),
-            road_half_width_m=float(p.road_half_width_m),
+            corridor=Corridor(p.road_half_width_m, p.road_half_width_m),
             counts=_counts(labels),
         )
 
@@ -470,19 +677,39 @@ def classify_frame(
         min_cell_points=max(2, int(p.min_bin_points)),
     )
     hag = ground.hag.astype(np.float64)
-    road_hw = estimate_road_half_width(points, p)
+    corridor = estimate_corridor(points, p)
+    bins, reference, observed, x_min = _reference_z(points, p)
 
     y = points[:, 1]
     known = np.isfinite(hag)
     ground_mask = known & (np.abs(hag) <= p.ground_band_m)
-    road_mask = ground_mask & (np.abs(y) <= road_hw) & (np.abs(points[:, 0]) <= p.corridor_max_x_m)
+    left_edge = corridor.per_point('left', bins)
+    right_edge = corridor.per_point('right', bins)
+    inside_corridor = (y <= left_edge) & (y >= -right_edge)
+    road_mask = ground_mask & inside_corridor & (np.abs(points[:, 0]) <= p.corridor_max_x_m)
     labels[road_mask] = int(Label.ROAD)
     labels[ground_mask & ~road_mask] = int(Label.GROUND)
     conf[ground_mask] = np.clip(
         1.0 - np.abs(hag[ground_mask]) / max(p.ground_band_m, 1e-3), 0.35, 1.0
     ).astype(np.float32)
 
-    segments = _bund_segments(points, hag, labels, conf, road_hw, p)
+    sides = [
+        _side_profile(
+            points,
+            labels,
+            conf,
+            side,
+            corridor,
+            bins,
+            reference,
+            observed,
+            x_min,
+            p,
+        )
+        for side in ('left', 'right')
+    ]
+    # Only a falling shoulder can be missing a bund.
+    segments = [seg for profile in sides if profile.kind == 'fill' for seg in profile.segments]
 
     # Rocks compete only for non-ground points the bund pass did not claim.
     free = known & (hag > p.obstacle_min_hag_m) & (labels == int(Label.UNKNOWN))
@@ -538,10 +765,11 @@ def classify_frame(
         labels=labels,
         conf=conf,
         hag=hag.astype(np.float32),
-        road_half_width_m=float(road_hw),
+        corridor=corridor,
         detections=detections,
         events=events,
         segments=segments,
+        sides=sides,
         counts=_counts(labels),
     )
 

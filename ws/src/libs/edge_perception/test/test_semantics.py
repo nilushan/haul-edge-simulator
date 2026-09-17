@@ -147,3 +147,67 @@ def test_style_catalog_covers_every_emitted_class():
         assert class_style(int(label)).key in keys
     types = {e['type'] for e in catalog['events']}
     assert {'rock', 'bund_low', 'bund_gap', 'excessive_vibration'} <= types
+
+
+def _asymmetric_corridor(
+    *,
+    left_edge=7.0,
+    right_edge=19.0,
+    berm_h=1.6,
+    cut_side=None,
+    seed=5,
+):
+    """
+    Scan of a truck running in a lane on a wide haul road.
+
+    ``cut_side`` climbs away from the road instead of carrying a bund, which is
+    what a road cut into a hillside actually looks like.
+    """
+    rng = np.random.default_rng(seed)
+    pts = []
+    for x in np.arange(4.0, 28.0, 0.35):
+        for y in np.arange(-right_edge, left_edge, 0.4):
+            pts.append((x, y, rng.normal(0.0, 0.02)))
+        for side, edge in (('left', left_edge), ('right', right_edge)):
+            sign = 1.0 if side == 'left' else -1.0
+            if side == cut_side:
+                for d in np.arange(0.0, 9.0, 0.3):
+                    pts.append((x, sign * (edge + d), 0.75 * d + rng.normal(0.0, 0.03)))
+                continue
+            for d in np.arange(0.0, 2.6, 0.2):
+                z = berm_h * (1.0 - abs(d - 1.2) / 1.4)
+                pts.append((x, sign * (edge + d), max(0.0, z) + rng.normal(0.0, 0.02)))
+    return np.asarray(pts, dtype=np.float64)
+
+
+def test_corridor_edges_are_measured_per_side():
+    from edge_perception.semantics import estimate_corridor
+
+    corridor = estimate_corridor(_asymmetric_corridor(), SemanticParams())
+    assert abs(corridor.left_m - 7.0) <= 1.5
+    assert abs(corridor.right_m - 19.0) <= 1.5
+    assert corridor.width_m > 20.0
+
+
+def test_wide_road_is_classified_across_its_whole_width():
+    res = classify_frame(_asymmetric_corridor())
+    assert res.counts.get('road', 0) > 500
+    # A point two thirds of the way to the far shoulder is still road.
+    assert res.counts['road'] > res.counts.get('ground', 0)
+
+
+def test_climbing_shoulder_is_a_cut_batter_not_a_missing_bund():
+    res = classify_frame(_asymmetric_corridor(cut_side='left'))
+    kinds = {profile.side: profile.kind for profile in res.sides}
+    assert kinds['left'] == 'cut'
+    assert kinds['right'] == 'fill'
+    assert res.counts.get('cut_slope', 0) > 50
+    # Nothing has to stop a truck falling uphill, so no finding on that side.
+    assert [e for e in res.events if e.details.get('side') == 'left'] == []
+
+
+def test_low_bund_on_the_near_shoulder_is_still_reported():
+    res = classify_frame(_asymmetric_corridor(cut_side='right', berm_h=0.6))
+    lows = [e for e in res.events if e.type == 'bund_low']
+    assert lows, 'a flattened near bund must still raise a finding'
+    assert lows[0].details['side'] == 'left'

@@ -65,7 +65,7 @@ class BundDetectNode(Node):
         pts, _ = decode_xyz(msg)
         if pts.size == 0:
             return
-        pts = pts[roi_mask(pts, y_abs_max=12.0)]
+        pts = pts[roi_mask(pts)]
         pts = voxel_downsample(pts, 0.2)
         if pts.shape[0] < 20:
             return

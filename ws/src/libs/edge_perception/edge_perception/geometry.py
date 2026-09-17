@@ -19,7 +19,8 @@ def roi_mask(
     *,
     x_min: float = 1.0,
     x_max: float = 60.0,
-    y_abs_max: float = 12.0,
+    # Wide enough to keep the far shoulder of a three-lane haul road in view.
+    y_abs_max: float = 26.0,
     z_min: float = -3.0,
     z_max: float = 6.0,
 ) -> np.ndarray:

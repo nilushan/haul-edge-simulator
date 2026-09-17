@@ -73,7 +73,9 @@ def test_overlay_labels_the_scan_and_reports_counts():
     assert len(labels) == tick['lidar']['n']
     assert set(labels) >= {int(Label.ROAD), int(Label.BUND)}
     assert tick['detect']['counts']['road'] > 0
-    assert tick['detect']['road_half_width_m'] > 3.0
+    corridor = tick['detect']['corridor']
+    assert corridor['left_m'] > 3.0 and corridor['right_m'] > 3.0
+    assert {s['side'] for s in tick['detect']['sides']} == {'left', 'right'}
     assert len(tick['lidar']['conf']) == len(labels)
 
 

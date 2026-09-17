@@ -51,6 +51,16 @@ class PathProfile:
         (1.4, 0.018, 0.0),
         (0.7, 0.04, 0.8),
     )
+    # Road half-width variation along the route: (amplitude_m, freq_1/m, phase)
+    width_terms: Tuple[Tuple[float, float, float], ...] = (
+        (2.2, 0.0045, 0.0),
+        (1.1, 0.011, 1.3),
+    )
+    # How often the road crosses from one side of the hill to the other, and
+    # how sharp that transition is.
+    tilt_period_m: float = 460.0
+    tilt_phase: float = 0.35
+    tilt_sharpness: float = 2.6
 
 
 class HaulWorld:
@@ -66,18 +76,32 @@ class HaulWorld:
 
     def __init__(
         self,
-        road_half_width_m: float = 6.5,
+        road_half_width_m: float = 13.0,
         berm_height_m: float = 1.65,
-        berm_width_m: float = 2.0,
+        berm_width_m: float = 2.6,
         seed: int = 19,
         n_rocks: int = 48,
         rock_radius: Tuple[float, float] = (0.3, 1.15),
         path: PathProfile | None = None,
         n_bund_defects: int = 4,
+        cut_slope: float = 0.75,
+        cut_height_m: float = 9.0,
+        fill_slope: float = 0.62,
+        fill_depth_m: float = 14.0,
+        lane_offset_frac: float = 0.45,
     ) -> None:
         self.road_hw = float(road_half_width_m)
         self.berm_h = float(berm_height_m)
         self.berm_w = float(berm_width_m)
+        # A haul road is cut into a hillside: one shoulder runs up into the
+        # batter, the other drops away and carries the safety bund.
+        self.cut_slope = float(cut_slope)
+        self.cut_height = float(cut_height_m)
+        self.fill_slope = float(fill_slope)
+        self.fill_depth = float(fill_depth_m)
+        # Trucks keep to one side; the far bund is much further away than the
+        # near one, which is what the detectors actually have to cope with.
+        self.lane_offset_frac = float(lane_offset_frac)
         self.path = path or PathProfile()
         self._rng = np.random.default_rng(seed)
 
@@ -86,11 +110,19 @@ class HaulWorld:
         for i in range(int(n_rocks)):
             s = 30.0 + i * 22.0 + float(self._rng.uniform(-6, 6))
             cx, cy, yaw = self.centerline(s)
-            side = float(self._rng.choice([-1.0, 1.0]))
-            if self._rng.random() < 0.45:
-                lat = side * float(self._rng.uniform(0.8, max(0.9, self.road_hw - 0.6)))
+            half_width = float(self.road_half_width(s))
+            lane = float(self.lane_offset(s))
+            roll = float(self._rng.random())
+            if roll < 0.5:
+                # In the travelled lane, where a truck would actually meet it.
+                lat = lane + float(self._rng.uniform(-3.0, 3.0))
+            elif roll < 0.7:
+                # Anywhere across the running surface.
+                lat = float(self._rng.uniform(-half_width + 0.8, half_width - 0.8))
             else:
-                lat = side * float(self._rng.uniform(self.road_hw - 0.3, self.road_hw + 1.5))
+                # Spalled off a shoulder or the batter toe.
+                side = float(self._rng.choice([-1.0, 1.0]))
+                lat = side * float(self._rng.uniform(half_width - 1.5, half_width + 1.0))
             nx, ny = -np.sin(yaw), np.cos(yaw)
             self.rocks.append(
                 Rock(
@@ -106,13 +138,20 @@ class HaulWorld:
         # them every berm in the world is compliant by construction.
         self.bund_defects: List[BundDefect] = []
         for i in range(max(int(n_bund_defects), 0)):
-            # Alternate sides and mix in a full gap every third defect so every
-            # map exercises both findings rather than leaving it to chance.
+            # A defect only means anything on a shoulder that carries a bund,
+            # so each one is moved to the nearest station where its side is the
+            # falling side. Most go on the side the truck drives nearest; one
+            # in four sits on the far shoulder, which a single pass cannot
+            # measure — that case is real and the detectors must not pretend
+            # otherwise.
+            near_side = 1.0 if self.lane_offset_frac >= 0 else -1.0
+            side = near_side if i % 4 != 3 else -near_side
             gap = i % 3 == 2
+            target = 90.0 + i * 130.0 + float(self._rng.uniform(-25.0, 25.0))
             self.bund_defects.append(
                 BundDefect(
-                    side=1.0 if i % 2 == 0 else -1.0,
-                    s_start=90.0 + i * 130.0 + float(self._rng.uniform(-25.0, 25.0)),
+                    side=side,
+                    s_start=self._nearest_fill_station(target, side),
                     length_m=float(self._rng.uniform(14.0, 34.0)),
                     height_scale=0.0 if gap else float(self._rng.uniform(0.22, 0.52)),
                 )
@@ -135,6 +174,70 @@ class HaulWorld:
         if np.isscalar(s):
             return float(x), float(y), float(yaw)
         return x, y, yaw
+
+    def _nearest_fill_station(
+        self,
+        target_s: float,
+        side: float,
+        span_m: float = 500.0,
+        clearance_m: float = 60.0,
+    ) -> float:
+        """
+        Closest station to ``target_s`` where ``side`` is the falling side.
+
+        Stations already carrying a defect are skipped so findings stay
+        separable instead of piling up in one window.
+        """
+        taken = [(d.s_start, d.length_m) for d in self.bund_defects]
+        for offset in np.arange(0.0, float(span_m), 5.0):
+            for candidate in (target_s + offset, target_s - offset):
+                if candidate < 20.0:
+                    continue
+                tilt = float(self.hill_tilt(candidate))
+                # tilt > 0 means the hill rises to the left, so the left
+                # shoulder is a cut and the right one is fill.
+                is_fill = (side > 0 and tilt <= -0.35) or (side < 0 and tilt >= 0.35)
+                if not is_fill:
+                    continue
+                if any(
+                    candidate < start + length + clearance_m
+                    and start < candidate + clearance_m
+                    for start, length in taken
+                ):
+                    continue
+                return float(candidate)
+        return float(target_s)
+
+    def road_half_width(self, s: float | np.ndarray) -> np.ndarray | float:
+        """Half-width of the running surface at station ``s`` [m]."""
+        s_arr = np.asarray(s, dtype=float)
+        hw = np.full_like(s_arr, self.road_hw, dtype=float)
+        for amp, freq, phase in self.path.width_terms:
+            hw = hw + float(amp) * np.sin(float(freq) * s_arr + float(phase))
+        hw = np.maximum(hw, 4.0)
+        if np.isscalar(s):
+            return float(hw.reshape(-1)[0]) if hw.ndim else float(hw)
+        return hw
+
+    def lane_offset(self, s: float | np.ndarray) -> np.ndarray | float:
+        """Lateral offset of the travelled lane centre (positive = left)."""
+        hw = np.asarray(self.road_half_width(s), dtype=float)
+        offset = hw * self.lane_offset_frac
+        if np.isscalar(s):
+            return float(np.asarray(offset).reshape(-1)[0])
+        return offset
+
+    def hill_tilt(self, s: float | np.ndarray) -> np.ndarray | float:
+        """
+        Cross-slope of the hillside at ``s``: +1 rises to the left, -1 to the
+        right, ~0 on a flat bench where both shoulders are fill.
+        """
+        s_arr = np.asarray(s, dtype=float)
+        wave = np.sin(2.0 * np.pi * s_arr / max(self.path.tilt_period_m, 1.0) + self.path.tilt_phase)
+        tilt = np.tanh(self.path.tilt_sharpness * wave)
+        if np.isscalar(s):
+            return float(np.asarray(tilt).reshape(-1)[0])
+        return tilt
 
     def grade_z(self, s: float | np.ndarray) -> np.ndarray | float:
         s_arr = np.asarray(s, dtype=float)
@@ -187,26 +290,42 @@ class HaulWorld:
         lat = (x_arr - cx) * nx + (y_arr - cy) * ny
 
         z_grade = np.asarray(self.grade_z(s), dtype=float)
-        z = z_grade.copy()
+        half_width = np.asarray(self.road_half_width(s), dtype=float)
+        tilt = np.asarray(self.hill_tilt(s), dtype=float)
 
-        # road crown
-        on_road = np.abs(lat) <= self.road_hw
+        # Running surface: crowned for drainage, level across its width.
+        on_road = np.abs(lat) <= half_width
         z = np.where(
             on_road,
-            z + 0.05 * (1.0 - (lat / self.road_hw) ** 2),
-            z - 0.12 * np.minimum(np.abs(lat) - self.road_hw, 2.5),
+            z_grade + 0.05 * (1.0 - (lat / half_width) ** 2),
+            z_grade,
         )
 
-        # bunds both sides, scaled down (or removed) across defect stations
-        for side in (-1.0, 1.0):
-            c = side * (self.road_hw + 0.45 * self.berm_w)
-            d = np.abs(lat - c)
-            scale = self._berm_scale(s, side)
-            bund = z_grade + self.berm_h * scale * (1.0 - d / self.berm_w)
-            z = np.where((d < self.berm_w) & (scale > 0.02), np.maximum(z, bund), z)
+        # Beyond the edge the hillside either climbs (cut batter) or falls away
+        # (fill batter). `up` blends between the two so the road can cross from
+        # one side of the hill to the other without a step in the terrain.
+        beyond = np.maximum(np.abs(lat) - half_width, 0.0)
+        left = lat >= 0.0
+        up = np.where(left, np.clip(tilt, 0.0, 1.0), np.clip(-tilt, 0.0, 1.0))
+        rise = np.minimum(self.cut_slope * beyond, self.cut_height)
+        drop = np.minimum(self.fill_slope * beyond, self.fill_depth)
+        z = np.where(on_road, z, z_grade + up * rise - (1.0 - up) * drop)
+
+        # Safety bund on the falling shoulder only; a cut batter needs none, so
+        # the berm fades out as that side becomes the high side.
+        c = half_width + 0.45 * self.berm_w
+        d = np.abs(np.abs(lat) - c)
+        defect_scale = np.where(left, self._berm_scale(s, 1.0), self._berm_scale(s, -1.0))
+        # Present on a falling shoulder, gone once the side is clearly a batter.
+        # The handover is deliberately short: a real bund is built to height or
+        # not built at all, it is not tapered away over a hundred metres.
+        presence = self._smoothstep((0.40 - up) / 0.10)
+        scale = defect_scale * presence
+        bund = z_grade + self.berm_h * scale * (1.0 - d / self.berm_w)
+        z = np.where((d < self.berm_w) & (scale > 0.02), np.maximum(z, bund), z)
 
         # off-road roughness
-        off = np.abs(lat) > self.road_hw + self.berm_w
+        off = np.abs(lat) > half_width + self.berm_w
         z = np.where(off, z + 0.35 * np.sin(0.03 * x_arr) * np.sin(0.05 * y_arr), z)
 
         # Rocks are upper-hemisphere bumps on the local surface. Evaluate all

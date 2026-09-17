@@ -27,6 +27,7 @@ const els = {
   p_ll: document.getElementById('p_ll'),
   p_lidar: document.getElementById('p_lidar'),
   p_road: document.getElementById('p_road'),
+  p_sides: document.getElementById('p_sides'),
   p_vibe: document.getElementById('p_vibe'),
   alertBadge: document.getElementById('alertBadge'),
   alertFeed: document.getElementById('alertFeed'),
@@ -669,11 +670,18 @@ function isForward(bx, minX = 1.0) {
   return bx >= minX;
 }
 
-/** Shoulder / bund band in body frame (always present along haul road). */
-function isBundBand(bx, by, roadHw = 6.5, band = 3.5) {
+// Last corridor the server reported, so the unlabelled fallback below knows
+// how wide the road is instead of assuming a fixed width.
+let lastCorridor = null;
+
+/** Shoulder / bund band in body frame, using the reported corridor edges. */
+function isBundBand(bx, by, band = 4.0) {
   if (!isForward(bx, 0.5)) return false;
+  const edge = by >= 0
+    ? Number(lastCorridor?.left_m) || 12.0
+    : Number(lastCorridor?.right_m) || 12.0;
   const ay = Math.abs(by);
-  return ay >= roadHw - 0.8 && ay <= roadHw + band;
+  return ay >= edge - 0.8 && ay <= edge + band;
 }
 
 function bundColor(sideLeft, out, i) {
@@ -1148,7 +1156,7 @@ function severityColor(sev) {
   return new THREE.Color(styles.severities[sev] || styles.severities.info).getHex();
 }
 
-const LABEL_HEIGHT_M = 1.7;
+const LABEL_HEIGHT_M = 1.3;
 const LABEL_STALK_M = 3.4;
 
 /** Billboard text tag drawn above an event marker. */
@@ -1195,7 +1203,8 @@ function makeLabelSprite(text, color, severity) {
   const sprite = new THREE.Sprite(
     new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false, depthWrite: false }),
   );
-  sprite.scale.set((LABEL_HEIGHT_M * canvas.width) / canvas.height, LABEL_HEIGHT_M, 1);
+  sprite.userData.aspect = canvas.width / canvas.height;
+  sprite.scale.set(LABEL_HEIGHT_M * sprite.userData.aspect, LABEL_HEIGHT_M, 1);
   sprite.renderOrder = 10;
   return sprite;
 }
@@ -1296,6 +1305,23 @@ function pruneAlertMarkers() {
       disposeMarker(entry.mesh);
       alertMarkerById.delete(id);
     }
+  }
+}
+
+// Sprites shrink with distance, so a marker a few metres from the camera
+// fills the screen. Hold the tags to a readable band instead.
+const LABEL_REF_DIST_M = 40;
+const LABEL_MIN_DIST_M = 18;
+const LABEL_MAX_DIST_M = 90;
+
+function refreshLabelScales() {
+  for (const entry of alertMarkerById.values()) {
+    const sprite = entry.mesh.userData?.sprite;
+    if (!sprite || !sprite.visible) continue;
+    const distance = camera.position.distanceTo(entry.mesh.position);
+    const clamped = Math.min(LABEL_MAX_DIST_M, Math.max(LABEL_MIN_DIST_M, distance));
+    const height = (LABEL_HEIGHT_M * clamped) / LABEL_REF_DIST_M;
+    sprite.scale.set(height * (sprite.userData.aspect || 6), height, 1);
   }
 }
 
@@ -1467,6 +1493,7 @@ window.addEventListener('resize', onResize);
 function animate() {
   requestAnimationFrame(animate);
   updateCamera();
+  refreshLabelScales();
   controls.update();
   renderer.render(scene, camera);
 }
@@ -1519,9 +1546,18 @@ function applyPhysics(msg) {
   els.p_lidar.textContent =
     scanN != null ? `scan ${scanN} · map ${mapCount.toLocaleString()} vox` : `map ${mapCount.toLocaleString()} vox`;
 
-  const roadHw = msg.detect?.road_half_width_m;
+  const corridor = msg.detect?.corridor;
+  if (corridor?.left_m) lastCorridor = corridor;
   if (els.p_road) {
-    els.p_road.textContent = roadHw ? `${fmt(roadHw, 2)} m` : '—';
+    els.p_road.textContent = corridor?.left_m
+      ? `${fmt(corridor.left_m, 1)} / ${fmt(corridor.right_m, 1)} m  (${fmt(corridor.width_m, 1)} wide)`
+      : '—';
+  }
+  if (els.p_sides) {
+    const sides = msg.detect?.sides || [];
+    els.p_sides.textContent = sides.length
+      ? sides.map((s) => `${s.side} ${s.kind}`).join(' · ')
+      : '—';
   }
 
   const vibe = msg.detect?.vibe;

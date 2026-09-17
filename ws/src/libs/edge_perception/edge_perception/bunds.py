@@ -1,4 +1,11 @@
-"""Bund / berm crest extraction along haul corridor shoulders."""
+"""
+Bund / berm crest extraction along haul corridor shoulders.
+
+Standalone crest extractor kept for direct use and testing. The nodes and
+the visualiser run `edge_perception.semantics.classify_frame` instead, which
+measures each shoulder against a per-bin corridor estimate; prefer that for
+anything that has to agree with the rest of the stack.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +19,8 @@ from edge_perception.schema import Detection, Label
 
 @dataclass
 class BundParams:
-    road_half_width_m: float = 6.5
+    # Haul roads run three to four trucks abreast; see SemanticParams.
+    road_half_width_m: float = 12.0
     shoulder_band_m: float = 4.0
     x_bin_m: float = 1.5
     min_height_m: float = 0.45

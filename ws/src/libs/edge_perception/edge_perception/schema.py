@@ -18,6 +18,7 @@ class Label(IntEnum):
     OBSTACLE = 3    # non-ground return that is not a rock or a bund
     ROAD = 4        # drivable corridor surface
     BUND_LOW = 5    # berm crest below the compliance height
+    CUT_SLOPE = 6   # batter climbing away from the road on the high side
     UNKNOWN = 255
 
 
@@ -100,6 +101,14 @@ CLASS_STYLES: Tuple[ClassStyle, ...] = (
         description='Berm crest below the compliance height.',
     ),
     ClassStyle(
+        label=int(Label.CUT_SLOPE),
+        key='cut_slope',
+        title='Cut batter',
+        color='#c9884a',
+        layer='cut',
+        description='Hillside climbing away from the road; no bund required here.',
+    ),
+    ClassStyle(
         label=int(Label.ROCK),
         key='rock',
         title='Rock',
@@ -128,6 +137,7 @@ CLASS_STYLES: Tuple[ClassStyle, ...] = (
 LAYER_STYLES: Tuple[LayerStyle, ...] = (
     LayerStyle(key='ground', title='road / ground', default_on=True),
     LayerStyle(key='bund', title='bunds', default_on=True),
+    LayerStyle(key='cut', title='cut batter', default_on=True),
     LayerStyle(key='rock', title='rocks', default_on=True),
     LayerStyle(key='obstacle', title='non-ground', default_on=True),
     LayerStyle(key='unknown', title='unclassified', default_on=False),

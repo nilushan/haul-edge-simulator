@@ -57,6 +57,7 @@ call it, so the bus and the browser never disagree about what a point is.
 | `ground` | 0 | Traversable surface outside the corridor |
 | `bund` | 2 | Berm crest at or above the compliance height |
 | `bund_low` | 5 | Berm crest below the compliance height |
+| `cut_slope` | 6 | Batter climbing away from the road on the high side |
 | `rock` | 1 | Compact non-ground cluster of rock-like size |
 | `obstacle` | 3 | Non-ground return that is not a rock or a bund |
 | `unknown` | 255 | No ground support in the cell, so no class was assigned |
@@ -73,17 +74,39 @@ Colours, titles, and short map tags live in one table
 `/api/classes`. Add a class or event there and the 3D view, the toggles, the
 legend, and the event feed all pick it up — no colours are hard-coded in the UI.
 
+### The corridor is measured, not assumed
+
+A haul road runs three to four trucks wide, varies in width, and curves out of
+the body-frame band within the look-ahead; the truck sits in a lane, so its two
+shoulders are at very different distances. The classifier therefore measures
+**each edge separately and per longitudinal bin**, taking the innermost clearly
+raised return as that bin's edge and smoothing across neighbouring bins so a
+rock near the shoulder cannot pull the edge inwards.
+
+Each shoulder is then typed. If the ground keeps climbing past where a berm
+would sit, that side is a **cut batter**: it gets its own class and raises no
+bund findings, because nothing has to stop a truck falling uphill.
+
 ### Measurement honesty
 
-- Bund height is measured against the road surface in the same longitudinal
-  bin, not against the local ground grid (inside a berm the grid rides up with
-  the berm and would report a few centimetres).
-- A crest is only measured when the shoulder was sampled past it. A beam that
-  grazed the inner flank yields a `bund` with low confidence and **no** height
-  finding, instead of a false "low bund".
-- An unsampled shoulder only counts as a gap within
-  `gap_observed_max_x_m`; beyond that, absence of returns is not evidence of a
-  missing bund.
+- Heights are measured against a **plane fitted to the running surface**, not
+  against a constant per-bin height. A couple of degrees of vehicle roll lifts
+  one side of a 30 m road by most of a metre in the body frame — more than a
+  bund is tall — so a flat reference reads the far shoulder as raised and the
+  near one as sunken. The fit seeds from the lane the truck is in and grows
+  over the points that agree with it.
+- Bund height is measured against that surface, not against the local ground
+  grid (inside a berm the grid rides up with the berm and would report a few
+  centimetres).
+- A crest height is only claimed when the scan reached **past the crest and
+  came back down** the far side. Along a distant shoulder the beams skim over
+  the crest and stop on the inner flank, which would otherwise read as a low
+  bund on every frame. In practice this limits height findings to the shoulder
+  the truck is driving beside — the far shoulder is reported as a bund with no
+  height claim.
+- An unsampled shoulder only counts as a gap within `gap_observed_max_x_m`
+  longitudinally and `gap_max_edge_m` laterally; beyond that, absence of
+  returns is about grazing geometry, not a missing bund.
 - Rock detection on a 16-ring scan is range-limited: reliable from roughly
   20 m in, median first detection around 12 m.
 

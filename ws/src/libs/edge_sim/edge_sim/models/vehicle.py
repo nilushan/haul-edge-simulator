@@ -92,10 +92,17 @@ class VehicleSimulator:
         self._last_az = 0.0
 
         # snap to route start
-        self._x, self._y, self._yaw = self.world.centerline(0.0)
-        self._z = float(self.world.height(self._x, self._y))
+        self._snap_to_route()
         self._vx = self._speed * math.cos(self._yaw)
         self._vy = self._speed * math.sin(self._yaw)
+
+    def _snap_to_route(self) -> None:
+        """Place the truck in its lane at the current station."""
+        cx, cy, self._yaw = self.world.centerline(self._s)
+        lane = float(self.world.lane_offset(self._s))
+        self._x = cx - math.sin(self._yaw) * lane
+        self._y = cy + math.cos(self._yaw) * lane
+        self._z = float(self.world.height(self._x, self._y))
 
     def reset(self, t0: float = 0.0) -> None:
         self._rng = np.random.default_rng(self._seed)
@@ -104,8 +111,7 @@ class VehicleSimulator:
         self._prev = None
         self._speed = self.speed_cmd
         self._speed_target = self.speed_cmd
-        self._x, self._y, self._yaw = self.world.centerline(0.0)
-        self._z = float(self.world.height(self._x, self._y))
+        self._snap_to_route()
         self._pitch = 0.0
         self._roll = 0.0
         self._vx = self._speed * math.cos(self._yaw)
@@ -155,10 +161,12 @@ class VehicleSimulator:
         yaw_alpha = 1.0 - math.exp(-dt / 0.35)
         self._yaw = _wrap_pi(self._yaw + yaw_alpha * _wrap_pi(path_yaw - self._yaw))
 
-        lat_noise = 0.15 * math.sin(0.05 * self._s)
+        # Trucks run in a lane, not down the middle of a 25 m road, so the near
+        # shoulder is close and the far one is a long way off.
+        lane = float(self.world.lane_offset(self._s)) + 0.15 * math.sin(0.05 * self._s)
         nx, ny = -math.sin(path_yaw), math.cos(path_yaw)
-        self._x = cx + nx * lat_noise
-        self._y = cy + ny * lat_noise
+        self._x = cx + nx * lane
+        self._y = cy + ny * lane
         self._vx = (self._x - x_prev) / dt
         self._vy = (self._y - y_prev) / dt
 

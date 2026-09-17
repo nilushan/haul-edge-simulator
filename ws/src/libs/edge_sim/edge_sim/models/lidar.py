@@ -34,8 +34,10 @@ class LidarSimulator:
         self,
         n_rings: int = 16,
         n_azimuth: int = 288,  # paired with 0.25 m marching for real-time first-hit scans
-        elev_min_deg: float = -20.0,
-        elev_max_deg: float = 4.0,
+        # Tilted down: a 25 m wide haul road needs returns on the running
+        # surface beside the truck, not just out at the far shoulder.
+        elev_min_deg: float = -28.0,
+        elev_max_deg: float = 2.0,
         az_full_circle: bool = True,
         min_range_m: float = 1.5,
         max_range_m: float = 40.0,

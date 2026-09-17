@@ -1,6 +1,6 @@
 import numpy as np
 
-from edge_perception.bunds import detect_bunds
+from edge_perception.bunds import BundParams, detect_bunds
 from edge_perception.ground import estimate_ground_grid
 from edge_perception.rocks import detect_rocks
 from edge_perception.vibration import ImuSample, VibrationMonitor
@@ -44,7 +44,7 @@ def test_bunds_smoke():
             np.tile(np.linspace(0.2, 1.5, 5), 80),
         ]
     ).astype(np.float32)
-    dets, alerts = detect_bunds(pts)
+    dets, alerts = detect_bunds(pts, BundParams(road_half_width_m=6.5))
     assert isinstance(dets, list)
     assert isinstance(alerts, list)
 
