@@ -4,7 +4,7 @@
   <name>edge_sim</name>
   <version>0.3.0</version>
   <description>Haul-truck sensor simulation library (maps, models, stream hub). No ROS runtime required.</description>
-  <maintainer email="dev@example.com">edge_sim</maintainer>
+  <maintainer email="nilushan.silva@gmail.com">Nilushan Silva</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>python3-numpy</exec_depend>

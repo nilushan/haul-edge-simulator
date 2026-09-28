@@ -4,7 +4,7 @@
   <name>edge_processor</name>
   <version>0.3.0</version>
   <description>Example edge processor node (subscribe bus, publish /edge/*).</description>
-  <maintainer email="dev@example.com">edge_processor</maintainer>
+  <maintainer email="nilushan.silva@gmail.com">Nilushan Silva</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_python</buildtool_depend>

@@ -4,7 +4,7 @@
   <name>edge_bund_detect</name>
   <version>0.1.0</version>
   <description>Bund/berm detection node</description>
-  <maintainer email="dev@example.com">edge_bund_detect</maintainer>
+  <maintainer email="nilushan.silva@gmail.com">Nilushan Silva</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_python</buildtool_depend>

@@ -2,8 +2,19 @@
 data/**
 !data/README.md
 
-# python / tooling
+# operating systems / editors
 .DS_Store
+.idea/
+.vscode/
+
+# local environments and secrets
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+
+# python / tooling
 __pycache__/
 *.py[cod]
 *$py.class
@@ -14,18 +25,23 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.venv/
-venv/
+.coverage
+coverage.xml
+htmlcov/
 
 # ROS colcon
 ws/build/
 ws/install/
 ws/log/
 
-# bags / captures
+# bags / captures / local databases
 *.bag
 *.mcap
 *.db3
+*.sqlite
+*.sqlite3
 
-# playwright MCP scratch output
+# local agent and browser scratch output
 .playwright-mcp/
+.remember/
+*.log

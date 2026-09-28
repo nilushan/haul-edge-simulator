@@ -12,8 +12,8 @@ setup(
     ],
     install_requires=['setuptools', 'numpy'],
     zip_safe=True,
-    maintainer='edge_sim',
-    maintainer_email='dev@example.com',
+    maintainer='Nilushan Silva',
+    maintainer_email='nilushan.silva@gmail.com',
     description='Haul-truck sensor simulation library',
     license='Apache-2.0',
     entry_points={

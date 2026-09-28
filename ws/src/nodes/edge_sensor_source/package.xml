@@ -4,7 +4,7 @@
   <name>edge_sensor_source</name>
   <version>0.3.0</version>
   <description>ROS 2 node: publish simulated (or replayed) sensors onto the edge bus topics.</description>
-  <maintainer email="dev@example.com">edge_sensor_source</maintainer>
+  <maintainer email="nilushan.silva@gmail.com">Nilushan Silva</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_python</buildtool_depend>

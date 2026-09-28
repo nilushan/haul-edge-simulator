@@ -4,7 +4,7 @@
   <name>edge_viz</name>
   <version>0.3.0</version>
   <description>Browser visualizer for haul-edge sensors (StreamHub or ROS bus).</description>
-  <maintainer email="dev@example.com">edge_viz</maintainer>
+  <maintainer email="nilushan.silva@gmail.com">Nilushan Silva</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_python</buildtool_depend>

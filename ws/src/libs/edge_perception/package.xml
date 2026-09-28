@@ -7,7 +7,7 @@
     Pure perception library (no ROS nodes): ground, rocks, bunds, vibration,
     and shared alert/detection schemas. Nodes call into this package.
   </description>
-  <maintainer email="dev@example.com">edge_perception</maintainer>
+  <maintainer email="nilushan.silva@gmail.com">Nilushan Silva</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>python3-numpy</exec_depend>

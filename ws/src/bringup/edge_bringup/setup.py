@@ -15,8 +15,8 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='edge_bringup',
-    maintainer_email='dev@example.com',
+    maintainer='Nilushan Silva',
+    maintainer_email='nilushan.silva@gmail.com',
     description='Haul-edge bringup',
     license='Apache-2.0',
 )

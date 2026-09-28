@@ -18,8 +18,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
-# Unique compose project name — compose file lives in docker/, which would
-# otherwise default the project to "docker" and collide with other projects.
+# Use a stable Compose project name instead of the parent directory default.
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-haul-edge-sim}"
 
 MODE="${MODE:-viz}"

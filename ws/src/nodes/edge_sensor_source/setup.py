@@ -12,8 +12,8 @@ setup(
     ],
     install_requires=['setuptools', 'numpy'],
     zip_safe=True,
-    maintainer='edge_sensor_source',
-    maintainer_email='dev@example.com',
+    maintainer='Nilushan Silva',
+    maintainer_email='nilushan.silva@gmail.com',
     description='ROS sensor source node for haul-edge bus',
     license='Apache-2.0',
     entry_points={

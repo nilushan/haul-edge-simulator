@@ -30,9 +30,8 @@ def create_app(hub: Any, ws_hz: float = 10.0) -> web.Application:
     if not math.isfinite(ws_hz) or ws_hz <= 0:
         raise ValueError('ws_hz must be positive and finite')
     app = web.Application()
-    app['hub'] = hub
-    app['ws_clients']: Set[web.WebSocketResponse] = set()
-    app['ws_hz'] = ws_hz
+    ws_clients: Set[web.WebSocketResponse] = set()
+    pump_task: Optional[asyncio.Task[None]] = None
 
     async def index(_: web.Request) -> web.FileResponse:
         return web.FileResponse(STATIC_DIR / 'index.html')
@@ -136,7 +135,7 @@ def create_app(hub: Any, ws_hz: float = 10.0) -> web.Application:
     async def ws_stream(request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=20.0)
         await ws.prepare(request)
-        app['ws_clients'].add(ws)
+        ws_clients.add(ws)
         try:
             # Initial tick from hub (subscriber read)
             await ws.send_json(hub.live_tick())
@@ -165,7 +164,7 @@ def create_app(hub: Any, ws_hz: float = 10.0) -> web.Application:
                         except (KeyError, FileNotFoundError, RuntimeError) as exc:
                             await ws.send_json({'type': 'error', 'error': str(exc)})
         finally:
-            app['ws_clients'].discard(ws)
+            ws_clients.discard(ws)
         return ws
 
     app.router.add_get('/', index)
@@ -180,17 +179,18 @@ def create_app(hub: Any, ws_hz: float = 10.0) -> web.Application:
     app.router.add_get('/api/lidar', api_lidar)
     app.router.add_get('/ws', ws_stream)
 
-    async def on_start(app: web.Application) -> None:
+    async def on_start(_: web.Application) -> None:
+        nonlocal pump_task
         # Hub is the sole generator; viz only pumps subscribed ticks to browsers.
         hub.start()
 
         async def pump() -> None:
-            period = 1.0 / max(1.0, float(app['ws_hz']))
+            period = 1.0 / max(1.0, float(ws_hz))
             while True:
                 await asyncio.sleep(period)
                 payload = hub.live_tick()  # subscribe/read — never synthesize here
                 dead = []
-                for ws in list(app['ws_clients']):
+                for ws in list(ws_clients):
                     try:
                         await ws.send_json(payload)
                     except ConnectionResetError:
@@ -198,19 +198,18 @@ def create_app(hub: Any, ws_hz: float = 10.0) -> web.Application:
                     except Exception:  # noqa: BLE001
                         dead.append(ws)
                 for ws in dead:
-                    app['ws_clients'].discard(ws)
+                    ws_clients.discard(ws)
 
-        app['pump_task'] = asyncio.create_task(pump())
+        pump_task = asyncio.create_task(pump())
 
-    async def on_stop(app: web.Application) -> None:
-        task = app.get('pump_task')
-        if task:
-            task.cancel()
+    async def on_stop(_: web.Application) -> None:
+        if pump_task:
+            pump_task.cancel()
             try:
-                await task
+                await pump_task
             except asyncio.CancelledError:
                 pass
-        for ws in list(app['ws_clients']):
+        for ws in list(ws_clients):
             await ws.close(code=1001, message=b'server shutdown')
         hub.stop()
 
@@ -264,7 +263,7 @@ def build_source_from_args(args: argparse.Namespace) -> Any:
 def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     p = argparse.ArgumentParser(
-        description='Haul-edge visualizer (subscribes to sole StreamHub sensor source)'
+        description='Live visualizer for simulated haul-truck sensors and perception'
     )
     p.add_argument('--host', default=os.environ.get('VIZ_HOST', '127.0.0.1'))
     p.add_argument('--port', type=int, default=int(os.environ.get('VIZ_PORT', '8099')))

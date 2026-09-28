@@ -12,8 +12,8 @@ setup(
     ],
     install_requires=['setuptools', 'numpy'],
     zip_safe=True,
-    maintainer='edge_perception',
-    maintainer_email='dev@example.com',
+    maintainer='Nilushan Silva',
+    maintainer_email='nilushan.silva@gmail.com',
     description='Haul-edge perception algorithms (library only)',
     license='Apache-2.0',
 )

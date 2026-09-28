@@ -14,8 +14,8 @@ setup(
     ],
     install_requires=['setuptools', 'numpy', 'aiohttp'],
     zip_safe=True,
-    maintainer='edge_viz',
-    maintainer_email='dev@example.com',
+    maintainer='Nilushan Silva',
+    maintainer_email='nilushan.silva@gmail.com',
     description='Haul-edge web visualizer',
     license='Apache-2.0',
     entry_points={

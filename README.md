@@ -1,121 +1,168 @@
-# Haul edge sensor sim
+# Haul Edge Simulator
 
-Synthetic on-vehicle sensors for haul-truck edge development.
+A synthetic haul-truck sensor and edge-perception stack built with Python and ROS 2.
+It generates synchronized LiDAR, IMU, GNSS, and odometry streams across realistic
+haul-road terrain, detects operational hazards, and presents the results in a live
+3D browser interface.
 
-## Layout (`ws/src`)
+[![CI](https://github.com/nilushan/haul-edge-simulator/actions/workflows/ci.yml/badge.svg)](https://github.com/nilushan/haul-edge-simulator/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![ROS 2](https://img.shields.io/badge/ROS%202-Jazzy-22314E?logo=ros&logoColor=white)
+![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
 
-| Folder | What |
-|---|---|
-| **`libs/`** | Pure libraries — no ROS nodes |
-| **`nodes/`** | ROS node packages |
-| **`bringup/`** | Launch + config |
+<p align="center">
+  <img src="docs/assets/haul-edge-demo.gif" width="720" alt="Animated Haul Edge Simulator dashboard showing a truck, classified LiDAR points, a detected rock hazard, edge alerts, and live telemetry charts" />
+</p>
 
-| Package | Folder | Role |
-|---|---|---|
-| **edge_sim** | libs | Maps + sensor models + StreamHub |
-| **edge_perception** | libs | Frame classification, events, class/event styles |
-| **edge_sensor_source** | nodes | Sim → `/imu` `/gnss` `/lidar` `/odom` |
-| **edge_rock_detect** | nodes | `/lidar` → `/edge/lidar/rocks` + alerts |
-| **edge_bund_detect** | nodes | `/lidar` → `/edge/lidar/bunds` + alerts |
-| **edge_vibe_detect** | nodes | `/imu` → vibration alerts |
-| **edge_event_store** | nodes | `/edge/alerts` → SQLite |
-| **edge_processor** | nodes | Example `/lidar` → `/edge/*` stub |
-| **edge_viz** | nodes | Browser UI (hub or bus) |
-| **edge_bringup** | bringup | Launch + config |
+<p align="center"><em>Live synthetic LiDAR perception, hazard detection, vehicle telemetry, and edge alerts.</em></p>
 
-See [`docs/STRUCTURE.md`](docs/STRUCTURE.md).
+## Highlights
+
+- **Deterministic sensor simulation** for LiDAR, IMU, GNSS, and vehicle odometry.
+- **Four synthetic haul-road scenarios** with grades, switchbacks, cut batters,
+  safety berms, missing berm sections, and rock hazards.
+- **Shared perception library** for ground segmentation, semantic labeling, rock
+  detection, berm compliance checks, vibration monitoring, and event deduplication.
+- **ROS 2 edge architecture** with small, independently testable nodes connected by
+  a stable topic contract.
+- **Live 3D visualization** using Three.js, Chart.js, REST, and WebSockets.
+- **Replayable JSONL streams** for repeatable development and regression testing.
+- **Local event persistence** in SQLite for disconnected edge operation.
+
+## Demo architecture
+
+```text
+Synthetic sensors / recorded streams
+                 │
+                 ▼
+       ROS 2 sensor topic bus
+       /imu  /gnss  /lidar  /odom
+                 │
+       ┌─────────┼──────────┬───────────────┐
+       ▼         ▼          ▼               ▼
+  rock detect  berm detect  vibration   web visualizer
+       │         │          │               │
+       └─────────┴──────────┴─► alerts       ▼
+                              SQLite    live 3D browser
+```
+
+The core simulation and perception packages do not require a running ROS daemon.
+ROS nodes are deliberately thin adapters around those libraries.
 
 ## Quick start
 
+### Docker (recommended)
+
+Requirements: Docker with Compose v2.
+
 ```bash
-# Dev UI (StreamHub → browser, no ROS)
+./start.sh
+```
+
+Open <http://127.0.0.1:8099/> to explore the live simulation.
+
+Run the complete ROS 2 edge stack:
+
+```bash
+./start.sh --edge
+```
+
+### Local Python
+
+Requirements: Python 3.10 or newer.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ./scripts/run_viz.sh
-# open http://127.0.0.1:8099/
-
-# Docker
-./start.sh              # same dev UI
-./start.sh --edge       # full edge stack (detectors + viz)
-./start.sh --ros        # sensor source node only
 ```
 
-## Edge stack
+### Available modes
+
+| Command | Mode |
+|---|---|
+| `./start.sh` | In-process simulator, perception, and browser UI |
+| `./start.sh --edge` | Full ROS 2 stack with detectors, storage, and UI |
+| `./start.sh --ros` | ROS 2 sensor publisher only |
+| `./start.sh --replay` | Replay generated sensor streams |
+| `./start.sh --shell` | Interactive ROS 2 Jazzy container |
+
+Use `./start.sh --help` for map, port, and duration options.
+
+## Detection output
+
+Each LiDAR frame is assigned one of the shared semantic classes: `road`, `ground`,
+`bund`, `bund_low`, `cut_slope`, `rock`, `obstacle`, or `unknown`. Actionable
+findings are emitted as structured events:
+
+| Event | Example output |
+|---|---|
+| Rock hazard | Size, range, lateral offset, and in-lane state |
+| Low berm | Measured height, required height, deficit, length, and side |
+| Berm gap | Observed gap length and side |
+| Excessive vibration | RMS acceleration, peak acceleration, and vehicle speed |
+
+A single style catalog drives semantic colors, map markers, filters, and event
+labels so the perception output and browser presentation remain consistent.
+See [`docs/EDGE_ARCHITECTURE.md`](docs/EDGE_ARCHITECTURE.md) for detector behavior
+and measurement constraints.
+
+## Project structure
+
+```text
+ws/src/
+├── libs/
+│   ├── edge_sim/          # maps, vehicle and sensor models, stream I/O
+│   └── edge_perception/   # perception algorithms and shared schemas
+├── nodes/
+│   ├── edge_sensor_source/
+│   ├── edge_rock_detect/
+│   ├── edge_bund_detect/
+│   ├── edge_vibe_detect/
+│   ├── edge_event_store/
+│   ├── edge_processor/
+│   └── edge_viz/
+└── bringup/
+    └── edge_bringup/      # launch files and shared configuration
+```
+
+More detail is available in [`docs/STRUCTURE.md`](docs/STRUCTURE.md).
+
+## Testing
+
+The test suite covers sensor models, terrain generation, stream recording and
+replay, perception algorithms, event storage, node helpers, and visualization APIs.
 
 ```bash
-ros2 launch edge_bringup edge_vehicle.launch.py
-# nodes:
-#   edge_sensor_source / sensor_source
-#   edge_rock_detect   / edge_rock_detect
-#   edge_bund_detect   / edge_bund_detect
-#   edge_vibe_detect   / edge_vibe_detect
-#   edge_event_store   / edge_event_store
-#   edge_viz           / viz_from_bus
+python -m pip install -r requirements.txt pytest
+source scripts/env_pythonpath.sh
+python -m pytest ws/src/libs ws/src/nodes -q
 ```
 
-Bag-only (no sim source):
+## Generate replay data
 
-```bash
-ros2 launch edge_bringup edge_vehicle.launch.py use_sim:=false
-ros2 bag play your_drive.mcap   # remap onto bus topics
-```
-
-## Record streams
+Generated streams are intentionally excluded from Git.
 
 ```bash
 ./scripts/generate_streams.sh
 STREAM_MODE=replay ./scripts/run_viz.sh
 ```
 
-## Terrain
+## Scope
 
-Each map is a haul road cut into a hillside, not a flat strip:
+This project is a development and demonstration simulator. Its synthetic data and
+hazard detections are not validated for safety-critical vehicle operation.
+Planned improvements are tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-- **Three to four trucks wide** (19–38 m depending on the map) and the width
-  varies along the route.
-- **Cross-slope:** one shoulder climbs into a cut batter, the other falls away
-  and carries the safety bund. The road crosses from one side of the hill to
-  the other every few hundred metres.
-- **The truck runs in a lane**, not down the middle, so the near shoulder is a
-  few metres away and the far one can be twenty — which is what makes the
-  detection problem asymmetric.
-- A few under-built and missing bund sections are seeded on shoulders that
-  actually carry a bund, so the bund checks have something real to find.
+## Development process
 
-## Detection classes and events
+The architecture, functionality, domain modeling, and technical direction were
+designed and guided by Nilushan Silva. AI-assisted development tools were used
+during implementation, testing, and documentation; final decisions and review
+remained human-directed.
 
-Every LiDAR frame is classified into **road**, **ground**, **bund**,
-**bund low**, **cut batter**, **rock**, **non-ground** and **unclassified**, and the classes
-drive both the 3D colours and the toggles in the browser. Findings worth acting
-on are raised as events and frozen on the map where they were first seen, each
-with a colour-coded marker and a text tag:
+## License
 
-| Event | Map tag |
-|---|---|
-| Rock in or beside the lane | `ROCK · 1.2 m across` |
-| Berm below the compliance height | `BUND LOW · 0.74 m of 1.65 m · left` |
-| No berm over a stretch of shoulder | `BUND GAP · 18 m · right` |
-| Ride roughness over threshold | `VIBE` |
-
-A bund is only judged where the scan actually reached over the crest and back
-down the far side, which in practice means the shoulder the truck is driving
-beside. The far shoulder of a 30 m road is reported as a bund, with no height
-claim attached.
-
-The class and event styles come from one table
-(`edge_perception.schema.style_catalog`, served at `/api/classes`), so the
-legend, toggles, point colours, markers and event feed stay in step.
-
-See [`docs/EDGE_ARCHITECTURE.md`](docs/EDGE_ARCHITECTURE.md) for the
-thresholds and what the detector deliberately refuses to claim.
-
-## Maps
-
-`haul_corridor` · `tight_switchbacks` · `open_pit_bench` · `rocky_descent`
-
-## Architecture note
-
-- **Libs** (`ws/src/libs`) hold algorithms and schemas; unit-test without ROS.
-- **Nodes** (`ws/src/nodes`) are thin ROS wrappers around libs.
-- **Dev:** browser reads StreamHub in-process (`edge_viz.run_from_hub`), with
-  the same perception pass running inline (`--no-inline-detect` turns it off).
-- **Edge:** browser UI is fed by ROS subscriptions (`edge_viz.run_from_bus`).  
-- Browser never speaks ROS; it only uses WebSocket `/ws`.
+Licensed under the [Apache License 2.0](LICENSE). Vendored browser dependencies
+retain their original MIT licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
